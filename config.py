@@ -13,8 +13,8 @@ engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
-UPLOAD_DIR = Path("uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
+STORAGE_ROOT = Path("storage")
+STORAGE_ROOT.mkdir(exist_ok=True)
 
 LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
