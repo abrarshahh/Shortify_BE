@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 # ---------- CONFIG ----------
-DATABASE_URL = "postgresql://admin:video_pass@localhost:5432/shortify_ai"
+DATABASE_URL = "postgresql://admin: VIDEO_PASS@localhost:5432/shortify_ai"
 SECRET_KEY = "supersecret"
 ALGORITHM = "HS256"
 

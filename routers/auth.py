@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 from config import SessionLocal, logger
 from models import User, LoginHistory
 from passlib.hash import bcrypt
+from argon2 import PasswordHasher
 
 router = APIRouter(tags=["Account"])
 
@@ -22,10 +23,11 @@ class LoginRequest(BaseModel):
 @router.post("/signup")
 def signup(data: SignupRequest):
     db = SessionLocal()
+    ph = PasswordHasher()
     if db.query(User).filter(User.username == data.username).first():
         raise HTTPException(status_code=400, detail="User already exists")
     session_id = str(uuid.uuid4())
-    hashed_pw = bcrypt.hash(data.password)
+    hashed_pw = ph.hash(data.password)
     user = User(username=data.username, email=data.email, password_hash=hashed_pw, session_id=session_id)
     db.add(user)
     db.commit()
