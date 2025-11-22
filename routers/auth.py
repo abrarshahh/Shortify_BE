@@ -4,8 +4,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from config import SessionLocal, logger
 from models import User, LoginHistory
-from passlib.hash import bcrypt
 from argon2 import PasswordHasher
+from argon2 import exceptions as argon2_exceptions
 
 router = APIRouter(tags=["Account"])
 
@@ -13,37 +13,61 @@ router = APIRouter(tags=["Account"])
 class SignupRequest(BaseModel):
     username: str
     email: str
-    password: str
-
+    password: str 
 # ----- Login -----
 class LoginRequest(BaseModel):
     username: str
     password: str
 
+
+
+ph = PasswordHasher()
 @router.post("/signup")
 def signup(data: SignupRequest):
     db = SessionLocal()
-    ph = PasswordHasher()
-    if db.query(User).filter(User.username == data.username).first():
-        raise HTTPException(status_code=400, detail="User already exists")
-    session_id = str(uuid.uuid4())
-    hashed_pw = ph.hash(data.password)
-    user = User(username=data.username, email=data.email, password_hash=hashed_pw, session_id=session_id)
-    db.add(user)
-    db.commit()
-    logger.info(f"User {data.username} signed up with session_id {session_id}")
-    return {"message": "User created", "session_id": session_id}
+    try:
+        if db.query(User).filter(User.username == data.username).first():
+            raise HTTPException(status_code=400, detail="User already exists")
+        session_id = str(uuid.uuid4())
+        hashed_pw = ph.hash(data.password)
+        user = User(username=data.username, email=data.email, password_hash=hashed_pw, session_id=session_id)
+        db.add(user)
+        db.commit()
+        logger.info(f"User {data.username} signed up with session_id {session_id}")
+        return {"message": "User created", "session_id": session_id}
+    finally:
+        db.close()
 
 # ----- Login -----
 @router.post("/login")
 def login(data: LoginRequest):
     db = SessionLocal()
-    user = db.query(User).filter(User.username == data.username).first()
-    if not user or not bcrypt.verify(data.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    # Log login history
-    login_entry = LoginHistory(user_id=user.id)
-    db.add(login_entry)
-    db.commit()
-    logger.info(f"User {data.username} logged in")
-    return {"status": "ok", "session_id": user.session_id}
+    try:
+        user = db.query(User).filter(User.username == data.username).first()
+        if not user:
+            # don't reveal whether username exists
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        # verify takes (stored_hash, provided_password)
+        try:
+            ph.verify(user.password_hash, data.password)
+        except (argon2_exceptions.VerifyMismatchError, argon2_exceptions.InvalidHash, argon2_exceptions.VerificationError):
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+
+        # re-hash if parameters changed
+        try:
+            if ph.check_needs_rehash(user.password_hash):
+                user.password_hash = ph.hash(data.password)
+                db.add(user)
+                db.commit()
+        except Exception:
+            # non-critical: log and continue
+            logger.exception("Password rehash failed")
+
+        # Log login history
+        login_entry = LoginHistory(user_id=user.id)
+        db.add(login_entry)
+        db.commit()
+        logger.info(f"User {data.username} logged in")
+        return {"status": "ok", "session_id": user.session_id}
+    finally:
+        db.close()
