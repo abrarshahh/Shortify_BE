@@ -3,9 +3,15 @@ import logging
 from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
+from dotenv import load_dotenv
+load_dotenv()
 
 # ---------- CONFIG ----------
-DATABASE_URL = "postgresql://admin: VIDEO_PASS@localhost:5432/shortify_ai"
+database_url=os.getenv("DATABASE_URL")
+
+
+
+DATABASE_URL = database_url
 SECRET_KEY = "supersecret"
 ALGORITHM = "HS256"
 
