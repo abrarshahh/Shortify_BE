@@ -1,8 +1,8 @@
 import pytest
 from fastapi.testclient import TestClient
-from main import app
-from config import SessionLocal
-from models import User
+from backend_main.main import app
+from backend_main.config import SessionLocal
+from backend_main.models import User
 
 client = TestClient(app)
 

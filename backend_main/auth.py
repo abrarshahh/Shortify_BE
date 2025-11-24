@@ -1,8 +1,8 @@
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
-from config import SessionLocal
-from models import User
+from backend_main.config import SessionLocal
+from backend_main.models import User
 
 # ---------- AUTH ----------
 security = HTTPBearer()
