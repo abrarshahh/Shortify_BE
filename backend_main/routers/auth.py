@@ -2,8 +2,8 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from config import SessionLocal, logger
-from models import User, LoginHistory
+from backend_main.config import SessionLocal, logger
+from backend_main.models import User, LoginHistory
 from argon2 import PasswordHasher
 from argon2 import exceptions as argon2_exceptions
 

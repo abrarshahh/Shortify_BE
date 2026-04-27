@@ -2,10 +2,10 @@ import os, shutil, uuid
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
-from config import SessionLocal, STORAGE_ROOT, logger
-from models import Project, MediaAsset, User
-from auth import get_current_user
-from schemas import ProjectCreate, ProjectResponse, UploadResponse, MediaResponse
+from backend_main.config import SessionLocal, STORAGE_ROOT, logger
+from backend_main.models import Project, MediaAsset, User
+from backend_main.auth import get_current_user
+from backend_main.schemas import ProjectCreate, ProjectResponse, UploadResponse, MediaResponse
 from pydantic import BaseModel
 from typing import List
 
