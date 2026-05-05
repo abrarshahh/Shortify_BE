@@ -121,3 +121,11 @@ uploads/
 *.db
 *.sqlite
 storage/
+
+# data
+data/
+testing_data/
+
+# tests
+tests_agents/
+scratch/

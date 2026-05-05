@@ -7,6 +7,7 @@ from moviepy import (
     CompositeVideoClip,
     CompositeAudioClip,
     concatenate_videoclips,
+    TextClip,
 )
 from moviepy.audio.fx import MultiplyVolume
 from moviepy.video.fx import CrossFadeIn, Resize
@@ -35,6 +36,20 @@ class VideoEditor:
         self.clips_dir = clips_dir
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
+
+    def _find_font(self) -> str:
+        """Finds a suitable TTF font on the system for text overlays."""
+        candidates = [
+            "C:/Windows/Fonts/arialbd.ttf",   # Windows Arial Bold
+            "C:/Windows/Fonts/arial.ttf",
+            "C:/Windows/Fonts/calibri.ttf",
+            "C:/Windows/Fonts/verdana.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",  # Linux
+        ]
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        raise FileNotFoundError("No suitable font found. Please ensure Arial or Calibri is installed.")
 
     # ------------------------------------------------------------------
     # Public API
@@ -114,6 +129,28 @@ class VideoEditor:
                 clip = clip.with_audio(
                     clip.audio.with_effects([MultiplyVolume(self.ORIGINAL_AUDIO_VOLUME)])
                 )
+
+            # 6. Apply text overlay
+            text_overlay = item.get("text_overlay", "").strip()
+            if text_overlay:
+                font_path = self._find_font()
+                w, h = clip.size
+                txt_clip = TextClip(
+                    text=text_overlay,
+                    font=font_path,
+                    font_size=70,
+                    color="white",
+                    stroke_color="black",
+                    stroke_width=2,
+                    method="caption",
+                    size=(int(w * 0.8), None), # Wrap text if it gets too long
+                )
+                txt_clip = (
+                    txt_clip
+                    .with_duration(clip.duration)
+                    .with_position(("center", "center")) # Put text in the middle
+                )
+                clip = CompositeVideoClip([clip, txt_clip])
 
             processed_clips.append(clip)
             print(
