@@ -14,10 +14,13 @@ class AddMediaRequest(BaseModel):
 
 router = APIRouter(tags=["Inputs"])
 
-def save_upload_file(user_id: str, upload_file: UploadFile) -> str:
+def save_upload_file(user_id: str, upload_file: UploadFile, project_id: str = None) -> str:
     ext = Path(upload_file.filename).suffix
     media_id = uuid.uuid4()
-    rel_dir = Path(f"users/{user_id}/media")
+    if project_id:
+        rel_dir = Path(f"users/{user_id}/projects/{project_id}/media")
+    else:
+        rel_dir = Path(f"users/{user_id}/media")
     full_dir = STORAGE_ROOT / rel_dir
     full_dir.mkdir(parents=True, exist_ok=True)
     filename = f"{media_id}{ext}"
@@ -26,16 +29,37 @@ def save_upload_file(user_id: str, upload_file: UploadFile) -> str:
         f.write(upload_file.file.read())
     return str((rel_dir / filename))  # relative path to store in DB
 
+# Extensions that browsers / curl may not label with a proper MIME type
+_ALLOWED_EXTENSIONS = {
+    ".mp4", ".mov", ".avi", ".mkv", ".webm",   # video
+    ".jpg", ".jpeg", ".png", ".gif", ".webp",    # image
+    ".heic", ".heif",                             # Apple image formats
+    ".wav", ".mp3", ".aac", ".m4a", ".ogg",      # audio
+}
+
 def validate_file(upload_file: UploadFile) -> None:
-    mime = upload_file.content_type
-    if not mime.startswith("video/") and not mime.startswith("image/") and not mime.startswith("audio/"):
-        raise HTTPException(400, "Invalid file type")
-    # Limit max file size (e.g. 200MB)
-    max_size = 200 * 1024 * 1024  # 200MB
+    mime = upload_file.content_type or ""
+    filename = upload_file.filename or ""
+    ext = Path(filename).suffix.lower()
+
+    # Accept if MIME type is a known media type
+    is_valid_mime = (
+        mime.startswith("video/")
+        or mime.startswith("image/")
+        or mime.startswith("audio/")
+    )
+    # Fall back to extension check for files curl sends as application/octet-stream
+    is_valid_ext = ext in _ALLOWED_EXTENSIONS
+
+    if not is_valid_mime and not is_valid_ext:
+        raise HTTPException(400, f"Invalid file type: '{mime}' / '{ext}'. Allowed: video, image, audio.")
+
+    # Limit max file size (200MB)
+    max_size = 200 * 1024 * 1024
     file_size = len(upload_file.file.read())
     upload_file.file.seek(0)  # Reset file pointer
     if file_size > max_size:
-        raise HTTPException(400, "File too large")
+        raise HTTPException(400, "File too large (max 200MB)")
 
 @router.post("/projects", response_model=ProjectResponse, status_code=201)
 def create_project(
@@ -82,7 +106,7 @@ def upload_media(
     saved = []
     for upload in files:
         validate_file(upload)
-        rel_path = save_upload_file(str(user.id), project_id, upload)  # helper from earlier
+        rel_path = save_upload_file(str(user.id), upload, project_id=project_id)
         # Get file size
         full_path = STORAGE_ROOT / rel_path
         file_size = full_path.stat().st_size

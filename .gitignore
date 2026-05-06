@@ -129,3 +129,6 @@ testing_data/
 # tests
 tests_agents/
 scratch/
+
+# logs
+logs/
