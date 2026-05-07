@@ -39,37 +39,44 @@ graph TD
     subgraph Web API Layer
         A[FastAPI Server]
         B[Auth Router]
-        C[Inputs Router]
-        D[Render Router]
+        C[Projects Router]
+        D[Media Router]
+        E[Audio Router]
+        F[Render Router]
         DB[(PostgreSQL)]
         FS[(File Storage)]
     end
 
     subgraph AI Engine Layer
-        E[ShortifyOrchestrator\nLangGraph]
-        F[RhythmEngineer\nlibrosa]
-        G[MediaAnalyst\nGemini 1.5 Flash]
-        H[CreativeDirector\nGroq / Llama 3.3]
-        I[VideoEditor\nMoviePy 2.0]
-        J[SubtitleAgent\nWhisper]
+        G[ShortifyOrchestrator\nLangGraph]
+        H[RhythmEngineer\nlibrosa]
+        I[MediaAnalyst\nGemini 1.5 Flash]
+        J[CreativeDirector\nGroq / Llama 3.3]
+        K[VideoEditor\nMoviePy 2.0]
+        L[SubtitleAgent\nWhisper]
     end
 
     Client --> A
     A --> B
     A --> C
     A --> D
+    A --> E
+    A --> F
     B --> DB
     C --> DB
-    C --> FS
     D --> DB
-    D -->|Background Task| E
-    E --> F
-    E --> G
-    E --> H
-    E --> I
-    E --> J
-    I --> FS
-    J --> FS
+    D --> FS
+    E --> DB
+    E --> FS
+    F --> DB
+    F -->|Background Task| G
+    G --> H
+    G --> I
+    G --> J
+    G --> K
+    G --> L
+    K --> FS
+    L --> FS
 ```
 
 ---
@@ -120,28 +127,28 @@ The entire pipeline is coordinated through a single `AgentState` TypedDict objec
 Shortify_BE/
 │
 ├── backend_ai/                        # AI Engine Layer
-│   ├── orchestrator.py                # LangGraph state machine — entry point for the pipeline
+│   ├── orchestrator.py                # LangGraph state machine — entry point for the 
 │   ├── services/
 │   │   ├── rhythm_service.py          # RhythmEngineer: beat detection via librosa
-│   │   ├── media_service.py           # MediaAnalyst: video understanding via Gemini 1.5 Flash
+│   │   ├── media_service.py           # MediaAnalyst: video understanding via Gemini 1.5 
 │   │   ├── director_service.py        # CreativeDirector: EDL generation via Groq / Llama 3.3
 │   │   ├── editor_service.py          # VideoEditor: local video rendering via MoviePy 2.0
-│   │   └── subtitle_service.py        # SubtitleAgent: Whisper transcription + safe-zone checks
-│   ├── agents/                        # (Reserved for future agent modules)
-│   ├── core/                          # Shared utilities and config for AI layer
+│   │   └── subtitle_service.py        # SubtitleAgent: Whisper transcription + safe-zone 
 │   ├── models.py                      # Pydantic output schemas for AI agents
 │   └── main.py                        # Standalone AI engine entry point (optional)
 │
 ├── backend_main/                      # Web API Layer
 │   ├── main.py                        # FastAPI app initialization and router registration
-│   ├── config.py                      # DB engine, session factory, storage path, logger setup
-│   ├── models.py                      # SQLAlchemy ORM models (User, Project, MediaAsset, etc.)
+│   ├── config.py                      # DB engine, session factory, storage path, logger 
+│   ├── models.py                      # SQLAlchemy ORM models (User, Project, MediaAsset, 
 │   ├── schemas.py                     # Pydantic request/response schemas for the API
 │   ├── auth.py                        # JWT token utilities and get_current_user dependency
 │   ├── routers/
 │   │   ├── auth.py                    # POST /signup, POST /login
-│   │   ├── inputs.py                  # Project and media upload/management endpoints
-│   │   └── render.py                  # Pipeline trigger, status polling, project listing
+│   │   ├── projects.py                # GET /projects, POST /projects, GET /projects/{id}, 
+│   │   ├── media.py                   # GET /media, POST /media/project/{id}/upload, POST /
+│   │   ├── audio.py                   # GET /audio, POST /audio/project/{id}/upload, POST /
+│   │   └── render.py                  # POST /projects/{id}/render, GET /projects/{id}/
 │   └── tests/                         # API integration tests
 │
 ├── tests/                             # AI agent unit and integration tests
@@ -149,13 +156,10 @@ Shortify_BE/
 │   ├── test_subtitles.py              # Tests for SubtitleAgent transcription and safe-zones
 │   └── test_orchestrator.py           # End-to-end pipeline test
 │
-├── data/                              # Output directory for rendered videos (gitignored)
-├── testing_data/                      # Local video/audio samples for testing (gitignored)
 ├── storage/                           # User file uploads organized by user/project (gitignored)
-├── Plan.md                            # Phased implementation roadmap
 ├── requirements.txt                   # Python dependencies
-├── reset_db.py                        # One-time DB schema migration utility
-└── .env                               # Environment secrets (gitignored)
+├── .env                               # Environment secrets (gitignored)
+└── .gitignore                         # Git exclusion rules
 ```
 
 ---
@@ -217,9 +221,9 @@ Shortify_BE/
 
    On a fresh database, run:
    ```bash
-   python reset_db.py
+   python -m tests.reset_db
    ```
-   This drops any stale tables and recreates the full schema with the correct UUID types.
+   This drops any stale tables and recreates the full schema with the correct UUID types and Foreign Key constraints.
 
 ---
 
@@ -248,10 +252,7 @@ GROQ_API_KEY=your-groq-key
 ## Running the Server
 
 ```bash
-# Development (with auto-reload)
-python -m fastapi dev backend_main/main.py --port 8002
-
-# Production
+# Production Mode
 python -m fastapi run backend_main/main.py --port 8002
 ```
 
@@ -269,21 +270,31 @@ Interactive documentation (Swagger UI) is at `http://localhost:8002/docs`.
 | `POST` | `/signup` | Register a new user account |
 | `POST` | `/login` | Authenticate and receive a JWT token |
 
-All protected endpoints require the `Authorization: Bearer <token>` header.
-
 ---
 
-### Inputs — Project and Media Management
+### Projects — Metadata and Listing
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/projects` | Create a new project |
-| `POST` | `/projects/{project_id}/media` | Upload one or more video/image files to a project |
-| `POST` | `/projects/{project_id}/music` | Upload a music file to a project |
-| `PUT` | `/projects/{project_id}/music` | Select an already-uploaded music file for a project |
-| `PUT` | `/projects/{project_id}/media` | Assign existing media assets to a project |
-| `GET` | `/media` | List all video/image assets for the current user |
-| `GET` | `/music` | List all music assets for the current user |
+| `GET` | `/projects` | List all projects with current render status |
+| `POST` | `/projects` | Create a new project metadata entry |
+| `GET` | `/projects/{id}` | Get project details (including linked media and selected music) |
+| `DELETE` | `/projects/{id}` | Soft delete: removes project record but keeps media files |
+| `DELETE` | `/projects/{id}/hard` | Hard delete: removes project, links, and exclusive assets from disk |
+
+---
+
+### Assets — Media and Audio Library
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/media` | List all video/photo assets in the library |
+| `POST` | `/media/project/{id}/upload` | Upload and link new videos/photos to a project |
+| `POST` | `/media/project/{id}/link` | Link existing library videos/photos to a project |
+| `GET` | `/audio` | List all audio tracks in the library |
+| `POST` | `/audio/project/{id}/upload` | Upload and set a new audio file as project music |
+| `POST` | `/audio/project/{id}/link` | Set an existing library track as project music |
+| `PUT` | `/media/project/{id}/replace/{old}/{new}` | Atomic swap of a media asset in a project |
 
 ---
 
@@ -291,32 +302,9 @@ All protected endpoints require the `Authorization: Bearer <token>` header.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/projects` | List all projects for the current user with render status |
-| `POST` | `/projects/{project_id}/render` | Trigger the full AI pipeline for a project |
-| `GET` | `/projects/{project_id}/render/status` | Poll the render job status |
-
-#### `POST /projects/{project_id}/render` — Request Body
-
-```json
-{
-  "prompt": "A motivational TikTok about a hiker conquering deep snow. Fast-paced and energetic.",
-  "output_filename": "final_output.mp4"
-}
-```
-
-#### `GET /projects/{project_id}/render/status` — Response
-
-```json
-{
-  "project_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-  "status": "done",
-  "message": "Render complete.",
-  "final_video_path": "storage/exports/3fa8.../orchestrated_final.mp4",
-  "safe_zone_verdict": "PASS"
-}
-```
-
-Possible `status` values: `queued`, `running`, `done`, `error`, `not_started`
+| `POST` | `/projects/{project_id}/render` | Trigger the full LangGraph pipeline |
+| `GET` | `/projects/{project_id}/render/status` | Poll current pipeline state |
+| `GET` | `/projects/outputs` | List all successfully rendered output videos |
 
 ---
 
@@ -341,13 +329,12 @@ erDiagram
         INTEGER target_duration
         VARCHAR aspect_ratio
         VARCHAR style
-        UUID music_id
+        UUID music_id FK "References media_assets.id"
         TIMESTAMP created_at
     }
 
     media_assets {
         UUID id PK
-        UUID project_id FK
         UUID user_id FK
         VARCHAR original_filename
         VARCHAR storage_path
@@ -361,6 +348,12 @@ erDiagram
         TIMESTAMP uploaded_at
     }
 
+    project_media_assets {
+        UUID project_id PK, FK
+        UUID media_asset_id PK, FK
+        TIMESTAMP added_at
+    }
+
     login_history {
         INTEGER id PK
         UUID user_id FK
@@ -370,7 +363,9 @@ erDiagram
     users ||--o{ projects : "owns"
     users ||--o{ media_assets : "uploads"
     users ||--o{ login_history : "logs"
-    projects ||--o{ media_assets : "contains"
+    projects ||--o{ project_media_assets : "contains (Many-to-Many)"
+    media_assets ||--o{ project_media_assets : "linked_to (Many-to-Many)"
+    projects ||--o| media_assets : "selected_music (1:1)"
 ```
 
 ---
@@ -381,18 +376,16 @@ erDiagram
 
 | Variable | Default | Description |
 |---|---|---|
-| `DATABASE_URL` | `sqlite:///./shortify.db` | SQLAlchemy connection string |
-| `SECRET_KEY` | `supersecret-change-in-prod` | JWT signing key |
-| `ALGORITHM` | `HS256` | JWT signing algorithm |
-| `STORAGE_ROOT` | `./storage` | Root directory for all user file uploads |
+| `DATABASE_URL` | N/A | PostgreSQL connection string |
+| `SECRET_KEY` | `supersecret` | JWT signing key |
+| `STORAGE_ROOT` | `./storage` | Root directory for file uploads |
 
 ### AI Pipeline — `backend_ai/orchestrator.py`
 
 | Parameter | Default | Description |
 |---|---|---|
-| `exports_dir` | `data/exports` | Output directory for rendered and final videos |
-| Whisper model size | `base` | Transcription model — options: `tiny`, `base`, `small`, `medium`, `large` |
-| Max safety retries | `5` | Maximum re-edit cycles before proceeding with the last render |
+| `exports_dir` | `storage/exports` | Output directory for rendered videos |
+| Max safety retries | `5` | Maximum re-edit cycles before completion |
 
 ### Safe-Zone Rules (`SubtitleAgent`)
 
