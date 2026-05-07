@@ -21,6 +21,12 @@ class User(Base):
     media_assets = relationship("MediaAsset", back_populates="user")
     # Removed reels relationship to avoid coupling with backend_ai
 
+class ProjectMediaAsset(Base):
+    __tablename__ = "project_media_assets"
+    project_id = Column(PG_UUID(as_uuid=True), ForeignKey("projects.id"), primary_key=True)
+    media_asset_id = Column(PG_UUID(as_uuid=True), ForeignKey("media_assets.id"), primary_key=True)
+    added_at = Column(DateTime, default=datetime.utcnow)
+
 class Project(Base):
     __tablename__ = "projects"
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -30,16 +36,15 @@ class Project(Base):
     target_duration = Column(Integer, nullable=False)  # seconds
     aspect_ratio = Column(String, nullable=False, default="9:16")
     style = Column(String, nullable=True)
-    music_id = Column(PG_UUID(as_uuid=True), nullable=True)  # FK to MediaAsset if music is uploaded
+    music_id = Column(PG_UUID(as_uuid=True), ForeignKey("media_assets.id"), nullable=True)  # FK to MediaAsset
     created_at = Column(DateTime, default=datetime.utcnow)
     user = relationship("User", back_populates="projects")
-    media_assets = relationship("MediaAsset", back_populates="project")
+    media_assets = relationship("MediaAsset", secondary="project_media_assets", back_populates="projects")
     # Removed reels relationship to avoid coupling with backend_ai
 
 class MediaAsset(Base):
     __tablename__ = "media_assets"
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    project_id = Column(PG_UUID(as_uuid=True), ForeignKey("projects.id"), nullable=False)
     user_id = Column(PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     original_filename = Column(String, nullable=False)
     storage_path = Column(String, nullable=False)  # relative path on disk
@@ -52,7 +57,7 @@ class MediaAsset(Base):
     extra_metadata = Column(JSON, nullable=True)  # e.g. faces, tags
     uploaded_at = Column(DateTime, default=datetime.utcnow)
     user = relationship("User", back_populates="media_assets")
-    project = relationship("Project", back_populates="media_assets")
+    projects = relationship("Project", secondary="project_media_assets", back_populates="media_assets")
 
 class LoginHistory(Base):
     __tablename__ = "login_history"

@@ -1,12 +1,16 @@
 from fastapi import FastAPI
-from backend_main.routers import auth, inputs, render
+from backend_main.routers import (
+    auth_router, projects_router, render_router, media_router, audio_router
+)
 
 # ---------- FASTAPI APP ----------
 app = FastAPI(title="Shortify AI", version="1.0.0")
 
-app.include_router(auth.router)
-app.include_router(inputs.router)
-app.include_router(render.router)
+app.include_router(auth_router)
+app.include_router(projects_router)
+app.include_router(media_router)
+app.include_router(audio_router)
+app.include_router(render_router)
 
 if __name__ == "__main__":
     import uvicorn
