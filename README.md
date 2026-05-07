@@ -127,28 +127,28 @@ The entire pipeline is coordinated through a single `AgentState` TypedDict objec
 Shortify_BE/
 │
 ├── backend_ai/                        # AI Engine Layer
-│   ├── orchestrator.py                # LangGraph state machine — entry point for the 
+│   ├── orchestrator.py                # LangGraph state machine — entry point for the pipeline
 │   ├── services/
 │   │   ├── rhythm_service.py          # RhythmEngineer: beat detection via librosa
-│   │   ├── media_service.py           # MediaAnalyst: video understanding via Gemini 1.5 
+│   │   ├── media_service.py           # MediaAnalyst: video understanding via Gemini 1.5 Flash
 │   │   ├── director_service.py        # CreativeDirector: EDL generation via Groq / Llama 3.3
 │   │   ├── editor_service.py          # VideoEditor: local video rendering via MoviePy 2.0
-│   │   └── subtitle_service.py        # SubtitleAgent: Whisper transcription + safe-zone 
+│   │   └── subtitle_service.py        # SubtitleAgent: Whisper transcription + safe-zone checks
 │   ├── models.py                      # Pydantic output schemas for AI agents
 │   └── main.py                        # Standalone AI engine entry point (optional)
 │
 ├── backend_main/                      # Web API Layer
 │   ├── main.py                        # FastAPI app initialization and router registration
-│   ├── config.py                      # DB engine, session factory, storage path, logger 
-│   ├── models.py                      # SQLAlchemy ORM models (User, Project, MediaAsset, 
+│   ├── config.py                      # DB engine, session factory, storage path, logger setup
+│   ├── models.py                      # SQLAlchemy ORM models (User, Project, MediaAsset, etc.)
 │   ├── schemas.py                     # Pydantic request/response schemas for the API
 │   ├── auth.py                        # JWT token utilities and get_current_user dependency
 │   ├── routers/
 │   │   ├── auth.py                    # POST /signup, POST /login
-│   │   ├── projects.py                # GET /projects, POST /projects, GET /projects/{id}, 
-│   │   ├── media.py                   # GET /media, POST /media/project/{id}/upload, POST /
-│   │   ├── audio.py                   # GET /audio, POST /audio/project/{id}/upload, POST /
-│   │   └── render.py                  # POST /projects/{id}/render, GET /projects/{id}/
+│   │   ├── projects.py                # GET /projects, POST /projects, GET /projects/{id}, DELETE /projects/{id}
+│   │   ├── media.py                   # GET /media, POST /media/project/{id}/upload, POST /media/project/{id}/link
+│   │   ├── audio.py                   # GET /audio, POST /audio/project/{id}/upload, POST /audio/project/{id}/link
+│   │   └── render.py                  # POST /projects/{id}/render, GET /projects/{id}/render/status, GET /projects/outputs
 │   └── tests/                         # API integration tests
 │
 ├── tests/                             # AI agent unit and integration tests
@@ -220,9 +220,11 @@ Shortify_BE/
 5. **Initialize the database schema**
 
    On a fresh database, run:
+
    ```bash
    python -m tests.reset_db
    ```
+
    This drops any stale tables and recreates the full schema with the correct UUID types and Foreign Key constraints.
 
 ---
