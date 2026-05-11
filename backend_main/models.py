@@ -37,6 +37,7 @@ class Project(Base):
     aspect_ratio = Column(String, nullable=False, default="9:16")
     style = Column(String, nullable=True)
     music_id = Column(PG_UUID(as_uuid=True), ForeignKey("media_assets.id"), nullable=True)  # FK to MediaAsset
+    last_output_path = Column(String, nullable=True) # Path to the last generated video
     created_at = Column(DateTime, default=datetime.utcnow)
     user = relationship("User", back_populates="projects")
     media_assets = relationship("MediaAsset", secondary="project_media_assets", back_populates="projects")

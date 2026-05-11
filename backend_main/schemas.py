@@ -2,6 +2,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
 from enum import Enum
+import uuid
 
 class DurationEnum(int, Enum):
     fifteen = 15
@@ -31,17 +32,17 @@ class ProjectCreate(BaseModel):
     style: Optional[StyleEnum] = None
 
 class ProjectResponse(BaseModel):
-    id: str
+    id: uuid.UUID
     title: Optional[str]
     description: Optional[str]
     target_duration: int
     aspect_ratio: str
     style: Optional[str]
-    music_id: Optional[str]
+    music_id: Optional[uuid.UUID]
     created_at: datetime
 
 class MediaResponse(BaseModel):
-    id: str
+    id: uuid.UUID
     original_filename: str
     storage_path: str
     mime_type: str
@@ -49,30 +50,30 @@ class MediaResponse(BaseModel):
     duration: Optional[int] = None
     thumbnail_path: Optional[str] = None
     uploaded_at: datetime
-    project_ids: List[str] = []
+    project_ids: List[uuid.UUID] = []
 
 class UploadItem(BaseModel):
-    id: str
+    id: uuid.UUID
     path: str
 
 class UploadResponse(BaseModel):
     uploaded: List[UploadItem]
 
 class MediaLinkRequest(BaseModel):
-    media_ids: Optional[List[str]] = None
+    media_ids: Optional[List[uuid.UUID]] = None
 
 class AudioLinkRequest(BaseModel):
-    audio_id: str
+    audio_id: uuid.UUID
 
 class ProjectDetailResponse(ProjectResponse):
     media: List[MediaResponse]
 
 class OutputVideoResponse(BaseModel):
-    project_id: str
+    project_id: uuid.UUID
     output_video: Optional[str] = None
 
 class ProjectListItem(BaseModel):
-    id: str
+    id: uuid.UUID
     title: Optional[str]
     description: Optional[str]
     target_duration: int
@@ -86,7 +87,7 @@ class RenderRequest(BaseModel):
     output_filename: Optional[str] = "final_output.mp4"
 
 class RenderResponse(BaseModel):
-    project_id: str
+    project_id: uuid.UUID
     status: str
     message: str
     final_video_path: Optional[str] = None

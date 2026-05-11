@@ -76,7 +76,7 @@ def create_project(
 
 @router.get("/{project_id}", response_model=ProjectDetailResponse)
 def get_project_details(
-    project_id: str,
+    project_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: Session = Depends(lambda: SessionLocal())
 ):
@@ -114,7 +114,7 @@ def get_project_details(
 
 @router.delete("/{project_id}")
 def delete_project_soft(
-    project_id: str,
+    project_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: Session = Depends(lambda: SessionLocal())
 ):
@@ -132,7 +132,7 @@ def delete_project_soft(
 
 @router.delete("/{project_id}/hard")
 def delete_project_hard(
-    project_id: str,
+    project_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: Session = Depends(lambda: SessionLocal())
 ):

@@ -123,6 +123,7 @@ uploads/
 storage/
 
 # data
+plan.md
 data/
 testing_data/
 

@@ -1,3 +1,4 @@
+import uuid
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -42,7 +43,7 @@ def upload_media_to_library(
 
 @router.post("/project/{project_id}/upload", response_model=UploadResponse, status_code=201)
 def upload_media_to_project(
-    project_id: str,
+    project_id: uuid.UUID,
     files: List[UploadFile] = File(...),
     user: User = Depends(get_current_user),
     db: Session = Depends(lambda: SessionLocal())
@@ -80,7 +81,7 @@ def upload_media_to_project(
 
 @router.post("/project/{project_id}/link", response_model=UploadResponse, status_code=201)
 def link_media_to_project(
-    project_id: str,
+    project_id: uuid.UUID,
     request_data: MediaLinkRequest,
     user: User = Depends(get_current_user),
     db: Session = Depends(lambda: SessionLocal())
@@ -130,8 +131,8 @@ def list_media(
 
 @router.delete("/project/{project_id}/{media_id}")
 def remove_media_from_project(
-    project_id: str,
-    media_id: str,
+    project_id: uuid.UUID,
+    media_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: Session = Depends(lambda: SessionLocal())
 ):
@@ -152,9 +153,9 @@ def remove_media_from_project(
 
 @router.put("/project/{project_id}/replace/{old_media_id}/{new_media_id}")
 def replace_project_media(
-    project_id: str,
-    old_media_id: str,
-    new_media_id: str,
+    project_id: uuid.UUID,
+    old_media_id: uuid.UUID,
+    new_media_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: Session = Depends(lambda: SessionLocal())
 ):
@@ -190,7 +191,7 @@ def replace_project_media(
 
 @router.delete("/{media_id}")
 def delete_media_entirely(
-    media_id: str,
+    media_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: Session = Depends(lambda: SessionLocal())
 ):

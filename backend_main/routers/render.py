@@ -1,5 +1,6 @@
 import os
 import shutil
+import uuid
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -25,6 +26,9 @@ def run_pipeline(
     video_paths: list,
     music_path: Optional[str],
     output_filename: str,
+    target_duration: int,
+    aspect_ratio: str,
+    style: Optional[str]
 ):
     """
     Background task: runs the full Shortify LangGraph pipeline.
@@ -37,6 +41,10 @@ def run_pipeline(
             "video_paths": video_paths,
             "music_path": music_path,
             "project_title": prompt,
+            "output_filename": output_filename,
+            "target_duration": target_duration,
+            "aspect_ratio": aspect_ratio,
+            "style": style or "general",
             "rhythm_data": {},
             "visual_data": [],
             "edl": {},
@@ -56,6 +64,18 @@ def run_pipeline(
         final_video = final_state.get("final_video_path", "")
         verdict = final_state.get("safe_zone_report", {}).get("verdict", "N/A")
 
+        # Update project in DB with last output path
+        db = SessionLocal()
+        try:
+            proj = db.query(Project).filter(Project.id == project_id).first()
+            if proj:
+                # Save as relative path to STORAGE_ROOT
+                rel_path = str(os.path.relpath(final_video, STORAGE_ROOT))
+                proj.last_output_path = rel_path
+                db.commit()
+        finally:
+            db.close()
+
         render_jobs[project_id] = {
             "status": "done",
             "message": "Render complete.",
@@ -73,7 +93,7 @@ def run_pipeline(
 
 @router.post("/{project_id}/render", response_model=RenderResponse, status_code=202)
 def trigger_render(
-    project_id: str,
+    project_id: uuid.UUID,
     body: RenderRequest,
     background_tasks: BackgroundTasks,
     user: User = Depends(get_current_user),
@@ -117,17 +137,20 @@ def trigger_render(
             if os.path.exists(candidate):
                 music_path = candidate
 
-    existing = render_jobs.get(project_id, {})
+    existing = render_jobs.get(str(project_id), {})
     if existing.get("status") == "running":
         raise HTTPException(409, "A render is already in progress.")
 
     background_tasks.add_task(
         run_pipeline,
-        project_id=project_id,
+        project_id=str(project_id),
         prompt=body.prompt,
         video_paths=video_paths,
         music_path=music_path,
         output_filename=body.output_filename,
+        target_duration=project.target_duration,
+        aspect_ratio=project.aspect_ratio,
+        style=project.style,
     )
 
     return RenderResponse(
@@ -138,7 +161,7 @@ def trigger_render(
 
 @router.get("/{project_id}/render/status", response_model=RenderResponse)
 def get_render_status(
-    project_id: str,
+    project_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: Session = Depends(lambda: SessionLocal()),
 ):
@@ -148,7 +171,7 @@ def get_render_status(
     if project.user_id != user.id:
         raise HTTPException(403, "Forbidden")
 
-    job = render_jobs.get(project_id)
+    job = render_jobs.get(str(project_id))
     if not job:
         return RenderResponse(
             project_id=project_id,
@@ -169,14 +192,11 @@ def list_output_videos(
     user: User = Depends(get_current_user),
     db: Session = Depends(lambda: SessionLocal())
 ):
-    projects = db.query(Project).filter(Project.user_id == user.id).all()
+    projects = db.query(Project).filter(Project.user_id == user.id, Project.last_output_path != None).all()
     outputs = []
     for proj in projects:
-        project_id = str(proj.id)
-        export_path = STORAGE_ROOT / "exports" / project_id / "orchestrated_final.mp4"
-        if export_path.exists():
-            outputs.append(OutputVideoResponse(
-                project_id=project_id,
-                output_video=str(export_path.relative_to(STORAGE_ROOT))
-            ))
+        outputs.append(OutputVideoResponse(
+            project_id=str(proj.id),
+            output_video=proj.last_output_path
+        ))
     return outputs

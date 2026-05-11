@@ -17,8 +17,27 @@ class MediaAnalyst:
         
         # New Google GenAI SDK Client
         self.client = genai.Client(api_key=api_key)
-        # Using gemini-flash-latest to avoid quota issues with experimental/new models
-        self.model_id = "gemini-flash-latest"
+        # Using the advanced/preview models available in this environment
+        self.primary_model = "gemini-3-flash-preview"
+        self.fallback_models = [
+            "gemini-2.5-flash", 
+            "gemini-1.5-flash", 
+            "gemini-1.5-flash-8b",
+            "gemini-flash-lite-latest"
+        ]
+        
+        # Cache configuration
+        self.cache_dir = "data/cache/media_analysis"
+        os.makedirs(self.cache_dir, exist_ok=True)
+
+    def _get_cache_path(self, file_path: str) -> str:
+        """Generates a cache file path based on file metadata."""
+        stats = os.stat(file_path)
+        # Using a simple fingerprint: filename + size + mtime
+        fingerprint = f"{os.path.basename(file_path)}_{stats.st_size}_{stats.st_mtime}"
+        import hashlib
+        cache_key = hashlib.md5(fingerprint.encode()).hexdigest()
+        return os.path.join(self.cache_dir, f"{cache_key}.json")
 
     def _get_file_metadata(self, file_path: str) -> Dict[str, Any]:
         """
@@ -50,6 +69,16 @@ class MediaAnalyst:
         """
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Video file not found: {file_path}")
+
+        # Check Cache
+        cache_path = self._get_cache_path(file_path)
+        if os.path.exists(cache_path):
+            print(f"Found cached analysis for: {file_path}")
+            try:
+                with open(cache_path, "r") as f:
+                    return json.load(f)
+            except Exception as e:
+                print(f"Error reading cache: {e}")
 
         print(f"Uploading video to Gemini: {file_path}")
         
@@ -111,14 +140,45 @@ class MediaAnalyst:
         3. Do not include any markdown formatting or extra text. Only return the raw JSON object.
         """
 
-        # Generate content using the new SDK
-        response = self.client.models.generate_content(
-            model=self.model_id,
-            contents=[video_file, prompt],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
-            )
-        )
+        # Generate content using the new SDK with model fallback and exponential backoff
+        all_models = [self.primary_model] + self.fallback_models
+        last_error = None
+        
+        for model_id in all_models:
+            print(f"Attempting analysis with model: {model_id}")
+            max_retries = 3
+            base_delay = 3
+            
+            success = False
+            for attempt in range(max_retries):
+                try:
+                    response = self.client.models.generate_content(
+                        model=model_id,
+                        contents=[video_file, prompt],
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json"
+                        )
+                    )
+                    success = True
+                    break # Success with this model!
+                except Exception as e:
+                    last_error = e
+                    if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                        if attempt < max_retries - 1:
+                            delay = base_delay * (2 ** attempt)
+                            print(f"Quota exceeded for {model_id}. Retrying in {delay}s... (Attempt {attempt + 1}/{max_retries})")
+                            time.sleep(delay)
+                            continue
+                        else:
+                            print(f"Quota exhausted for {model_id}. Switching to fallback model if available...")
+                            break # Try next model
+                    raise e # Re-raise if not a rate limit
+            
+            if success:
+                break
+        else:
+            # If we exhausted all models
+            raise last_error if last_error else Exception("All models failed analysis")
 
         try:
             # The new SDK might return a parsed object if response_mime_type is set,
@@ -138,11 +198,20 @@ class MediaAnalyst:
                 "file_metadata": file_metadata,
                 **analysis
             }
+            
+            # Save to Cache
+            try:
+                with open(cache_path, "w") as f:
+                    json.dump(final_result, f, indent=2)
+                print(f"Analysis cached successfully: {cache_path}")
+            except Exception as e:
+                print(f"Error writing cache: {e}")
+                
             return final_result
         except Exception as e:
             print(f"Error parsing Gemini response: {e}")
             return {
-                "raw_response": response.text,
+                "raw_response": response.text if response else "No response",
                 "error": f"Failed to parse structured JSON: {str(e)}"
             }
 

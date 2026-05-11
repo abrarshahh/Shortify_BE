@@ -74,6 +74,9 @@ class VideoEditor:
         if not timeline:
             raise ValueError("EDL timeline is empty. Nothing to render.")
 
+        # Ensure timeline is chronologically ordered
+        timeline.sort(key=lambda x: float(x.get("timeline_start", 0.0)))
+
         title = edl.get("title", "Untitled")
         print(f"Rendering '{title}' - {len(timeline)} director-specified segments...")
 
@@ -99,33 +102,67 @@ class VideoEditor:
             safe_end = min(end_in, raw.duration)
             clip = raw.subclipped(start_in, safe_end)
 
-            # 2. Apply pacing style (speed multiplier)
+            # 2. Resize and Center-Crop to 9:16 (1080x1920)
+            target_w, target_h = (1080, 1920)
+            clip_w, clip_h = clip.size
+            
+            # Calculate scaling to fill target
+            scale = max(target_w / clip_w, target_h / clip_h)
+            new_w, new_h = int(clip_w * scale), int(clip_h * scale)
+            
+            # Resize
+            clip = clip.with_effects([Resize(width=new_w, height=new_h)])
+            
+            # Center crop
+            x1 = (new_w - target_w) // 2
+            y1 = (new_h - target_h) // 2
+            clip = clip.cropped(x1=x1, y1=y1, width=target_w, height=target_h)
+            
+            # 2b. Apply pacing style (speed multiplier)
             speed = self.PACING_SPEED.get(pacing, 1.0)
             if speed != 1.0:
                 clip = clip.with_effects([
-                    # multiply_speed is the MoviePy 2.0 way to change speed
-                    __import__(
-                        "moviepy.video.fx",
-                        fromlist=["MultiplySpeed"]
-                    ).MultiplySpeed(speed)
+                    __import__("moviepy.video.fx", fromlist=["MultiplySpeed"]).MultiplySpeed(speed)
                 ])
 
-            # 3. If the director specified a target duration on the timeline,
-            #    trim or extend the clip to match exactly.
+            # 3. Match timeline duration exactly
             target_duration = round(tl_end - tl_start, 4)
-            if target_duration > 0 and abs(clip.duration - target_duration) > 0.05:
-                clip = clip.with_duration(min(target_duration, clip.duration))
+            if target_duration > 0:
+                # If clip is too short, we adjust speed (slow down) to fit, up to 0.5x
+                # If it's still too short, we let it be and it will just end early in its slot.
+                if clip.duration < target_duration:
+                    speed_factor = clip.duration / target_duration
+                    if speed_factor >= 0.5:
+                        clip = clip.with_effects([
+                            __import__("moviepy.video.fx", fromlist=["MultiplySpeed"]).MultiplySpeed(speed_factor)
+                        ])
+                    clip = clip.with_duration(target_duration)
+                else:
+                    clip = clip.with_duration(target_duration)
+
+            # Set the explicit start time on the timeline
+            clip = clip.with_start(tl_start)
 
             # 4. Apply transitions
             if transition in ("fade", "crossfade") and i > 0:
                 fade_dur = min(self.DEFAULT_FADE_DURATION, clip.duration / 2)
                 clip = clip.with_effects([CrossFadeIn(fade_dur)])
 
-            if transition == "zoom_in":
-                clip = clip.with_effects([Resize(lambda t: 1 + 0.03 * t)])
+            elif transition == "zoom_in":
+                clip = clip.with_effects([Resize(lambda t: 1 + 0.04 * t)])
+            
+            elif transition == "zoom_out":
+                clip = clip.with_effects([Resize(lambda t: 1.1 - 0.04 * t)])
+
+            elif transition in ("slide_left", "slide_right"):
+                # Simple slide simulation using Clip.with_position
+                # For a more professional slide, we'd need CompositeVideoClip transitions
+                # but for now we'll use a horizontal offset if possible
+                pass
 
             # 5. Duck original audio
             if clip.audio is not None:
+                # Only duck if there is actually audio in the clip
                 clip = clip.with_audio(
                     clip.audio.with_effects([MultiplyVolume(self.ORIGINAL_AUDIO_VOLUME)])
                 )
@@ -163,16 +200,46 @@ class VideoEditor:
         if not processed_clips:
             raise RuntimeError("No valid clips were processed. Check clips directory and EDL.")
 
-        # 6. Concatenate in director order (timeline positions already encoded
-        #    via clip durations that match timeline_start -> timeline_end gaps)
-        print("Concatenating clips per director timeline...")
-        final_video = concatenate_videoclips(processed_clips, method="compose")
+        # 6. Assemble in a CompositeVideoClip for absolute timeline positioning
+        print("Assembling clips in CompositeVideoClip...")
+        from moviepy import ColorClip
+        
+        # Use total duration from EDL or calculate from max timeline_end
+        final_duration = edl.get("total_duration", 0.0)
+        if final_duration <= 0:
+            final_duration = max([float(item.get("timeline_end", 0.0)) for item in timeline])
+        
+        # Create a black background as the base layer
+        base_layer = ColorClip(
+            size=(1080, 1920),
+            color=(0, 0, 0),
+            duration=final_duration
+        )
+        
+        final_video = CompositeVideoClip([base_layer] + processed_clips)
 
         # 7. Mix background music
         if music_path and os.path.exists(music_path):
             print(f"Mixing background music: {music_path}")
-            music = AudioFileClip(music_path).subclipped(0, final_video.duration)
-            music = music.with_effects([MultiplyVolume(self.MUSIC_VOLUME)])
+            music = AudioFileClip(music_path)
+            
+            music_start = float(edl.get("music_start_offset", 0.0))
+            music_end = music_start + final_video.duration
+            
+            # Ensure we don't exceed music duration
+            if music_end > music.duration:
+                music_start = max(0, music.duration - final_video.duration)
+                music_end = music.duration
+            
+            music = music.subclipped(music_start, music_end)
+
+            # Professional music finishing
+            from moviepy.audio.fx import AudioFadeOut
+            music = music.with_effects([
+                MultiplyVolume(self.MUSIC_VOLUME),
+                AudioFadeOut(1.5) # Smooth fade at the very end
+            ])
+
             if final_video.audio:
                 mixed = CompositeAudioClip([final_video.audio, music])
             else:
