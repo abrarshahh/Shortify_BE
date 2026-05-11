@@ -1,3 +1,4 @@
+import uuid
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -42,7 +43,7 @@ def upload_audio_to_library(
 
 @router.post("/project/{project_id}/upload", response_model=UploadResponse, status_code=201)
 def upload_audio_to_project(
-    project_id: str,
+    project_id: uuid.UUID,
     files: List[UploadFile] = File(...),
     user: User = Depends(get_current_user),
     db: Session = Depends(lambda: SessionLocal())
@@ -80,7 +81,7 @@ def upload_audio_to_project(
 
 @router.post("/project/{project_id}/link", response_model=UploadResponse, status_code=201)
 def link_audio_to_project(
-    project_id: str,
+    project_id: uuid.UUID,
     request_data: AudioLinkRequest,
     user: User = Depends(get_current_user),
     db: Session = Depends(lambda: SessionLocal())
@@ -103,8 +104,8 @@ def link_audio_to_project(
 
 @router.put("/project/{project_id}/select/{audio_id}")
 def select_project_music(
-    project_id: str,
-    audio_id: str,
+    project_id: uuid.UUID,
+    audio_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: Session = Depends(lambda: SessionLocal())
 ):
@@ -127,9 +128,9 @@ def select_project_music(
 
 @router.put("/project/{project_id}/replace/{old_audio_id}/{new_audio_id}")
 def replace_project_audio(
-    project_id: str,
-    old_audio_id: str,
-    new_audio_id: str,
+    project_id: uuid.UUID,
+    old_audio_id: uuid.UUID,
+    new_audio_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: Session = Depends(lambda: SessionLocal())
 ):
@@ -197,8 +198,8 @@ def list_audio(
 
 @router.delete("/project/{project_id}/{audio_id}")
 def remove_audio_from_project(
-    project_id: str,
-    audio_id: str,
+    project_id: uuid.UUID,
+    audio_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: Session = Depends(lambda: SessionLocal())
 ):
@@ -223,7 +224,7 @@ def remove_audio_from_project(
 
 @router.delete("/{audio_id}")
 def delete_audio_entirely(
-    audio_id: str,
+    audio_id: uuid.UUID,
     user: User = Depends(get_current_user),
     db: Session = Depends(lambda: SessionLocal())
 ):

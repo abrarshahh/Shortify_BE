@@ -18,6 +18,10 @@ class AgentState(TypedDict):
     video_paths: List[str]
     music_path: Optional[str]
     project_title: str
+    output_filename: str
+    target_duration: int
+    aspect_ratio: str
+    style: str
     
     # Internal data passed between nodes
     rhythm_data: Dict[str, Any]
@@ -106,6 +110,9 @@ class ShortifyOrchestrator:
                 print(f"Analyzing visual context for: {path}")
                 analysis = self.media_agent.analyze_video(path)
                 visual_data.append(analysis)
+                # Small delay to avoid bursting the Gemini API rate limit
+                import time
+                time.sleep(1.5)
             else:
                 print(f"Warning: Video not found at {path}")
                 
@@ -129,7 +136,10 @@ class ShortifyOrchestrator:
         edl = self.director_agent.generate_edl(
             user_prompt=prompt,
             media_analyses=state["visual_data"],
-            audio_analysis=state.get("rhythm_data", {})
+            audio_analysis=state.get("rhythm_data", {}),
+            target_duration=state["target_duration"],
+            aspect_ratio=state["aspect_ratio"],
+            style=state["style"]
         )
         
         return {"edl": edl, "edl_feedback": ""} # clear feedback after applying
@@ -144,7 +154,7 @@ class ShortifyOrchestrator:
         clips_dir = os.path.dirname(state["video_paths"][0])
         editor = VideoEditor(clips_dir=clips_dir, output_dir=self.exports_dir)
         
-        output_filename = "orchestrated_render.mp4"
+        output_filename = f"render_{state['output_filename']}"
         
         print(f"Rendering EDL to {output_filename}...")
         rendered_path = editor.render(
@@ -197,7 +207,7 @@ class ShortifyOrchestrator:
         print(f"Transcribing audio for {video_path}...")
         transcription = self.subtitle_agent.transcribe(video_path)
         
-        final_output = os.path.join(self.exports_dir, "orchestrated_final.mp4")
+        final_output = os.path.join(self.exports_dir, state["output_filename"])
         
         if transcription["captions"]:
             print(f"Burning subtitles to {final_output}...")
