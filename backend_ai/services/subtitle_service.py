@@ -202,8 +202,8 @@ class SubtitleAgent:
             
             # Subtitles are capped at 85% of width in burn_subtitles.
             # If centered, the right edge is at: (frame_width/2) + (text_width/2)
-            # Max text width = frame_width * 0.85
-            max_text_width = frame_width * 0.85
+            # Max text width = frame_width * 0.75
+            max_text_width = frame_width * 0.75
             assumed_x_right = int((frame_width / 2) + (max_text_width / 2))
 
             flags = []

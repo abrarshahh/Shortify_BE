@@ -7,7 +7,7 @@ rhythm_engineer:
 
 media_analyst:
   provider: "google"
-  primary_model: "gemini-3-flash-preview"
+  primary_model: "gemini-1.5-flash"
   fallback_models:
     - "gemini-2.5-flash"
     - "gemini-flash-lite-latest"
