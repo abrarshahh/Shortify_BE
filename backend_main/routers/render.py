@@ -67,7 +67,9 @@ def run_pipeline(
         # Update project in DB with last output path
         db = SessionLocal()
         try:
-            proj = db.query(Project).filter(Project.id == project_id).first()
+            # Cast project_id to UUID for correct comparison in Postgres
+            pid_uuid = uuid.UUID(project_id)
+            proj = db.query(Project).filter(Project.id == pid_uuid).first()
             if proj:
                 # Save as relative path to STORAGE_ROOT
                 rel_path = str(os.path.relpath(final_video, STORAGE_ROOT))
@@ -94,7 +96,8 @@ def run_pipeline(
         # Reset is_rendering flag in DB
         db = SessionLocal()
         try:
-            proj = db.query(Project).filter(Project.id == project_id).first()
+            pid_uuid = uuid.UUID(project_id)
+            proj = db.query(Project).filter(Project.id == pid_uuid).first()
             if proj:
                 proj.is_rendering = False
                 db.commit()

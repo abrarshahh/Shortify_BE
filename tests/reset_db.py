@@ -8,6 +8,8 @@ from sqlalchemy import text
 print("Dropping all existing tables...")
 with engine.begin() as conn:
     # Drop in reverse dependency order to avoid FK constraint errors
+    conn.execute(text("DROP TABLE IF EXISTS reels CASCADE"))
+    conn.execute(text("DROP TABLE IF EXISTS project_media_assets CASCADE"))
     conn.execute(text("DROP TABLE IF EXISTS login_history CASCADE"))
     conn.execute(text("DROP TABLE IF EXISTS media_assets CASCADE"))
     conn.execute(text("DROP TABLE IF EXISTS projects CASCADE"))

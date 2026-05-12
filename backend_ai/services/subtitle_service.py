@@ -199,7 +199,12 @@ class SubtitleAgent:
             # Default assumed text position: centered horizontally,
             # at 80% of frame height (our burn_subtitles default).
             assumed_y = int(frame_height * 0.80)
-            assumed_x_right = frame_width  # full width, centred
+            
+            # Subtitles are capped at 85% of width in burn_subtitles.
+            # If centered, the right edge is at: (frame_width/2) + (text_width/2)
+            # Max text width = frame_width * 0.85
+            max_text_width = frame_width * 0.85
+            assumed_x_right = int((frame_width / 2) + (max_text_width / 2))
 
             flags = []
             if assumed_y < SAFE_ZONE["top_px"]:
@@ -210,7 +215,7 @@ class SubtitleAgent:
                 )
             if assumed_x_right > frame_width - SAFE_ZONE["right_px"]:
                 flags.append(
-                    f"Text may overlap right-side buttons (right edge > {frame_width - SAFE_ZONE['right_px']}px)"
+                    f"Text may overlap right-side buttons (right edge approx {assumed_x_right}px, danger > {frame_width - SAFE_ZONE['right_px']}px)"
                 )
 
             entry = {

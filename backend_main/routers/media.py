@@ -149,6 +149,7 @@ def remove_media_from_project(
     if link:
         db.delete(link)
         db.commit()
+        return {"message": "Media removed from project"}
     raise HTTPException(404, "Relation not found")
 
 @router.put("/project/{project_id}/replace/{old_media_id}/{new_media_id}")

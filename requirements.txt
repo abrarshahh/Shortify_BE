@@ -53,3 +53,8 @@ langgraph
 openai-whisper
 langchain-groq
 langchain-google-genai
+scipy
+ffmpeg-python
+Pillow
+numpy
+argon2-cffi
