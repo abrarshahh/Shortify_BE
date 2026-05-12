@@ -3,6 +3,7 @@ import json
 from typing import List, Dict, Any
 from groq import Groq
 from dotenv import load_dotenv
+from backend_ai.core.config_loader import AGENTS_CONFIG
 
 load_dotenv()
 
@@ -13,7 +14,8 @@ class CreativeDirector:
             raise ValueError("GROQ_API_KEY not found in environment variables")
         
         self.client = Groq(api_key=api_key)
-        self.model_id = "llama-3.3-70b-versatile" # Using the latest Llama 3.3 for high reasoning
+        config = AGENTS_CONFIG.get("creative_director", {})
+        self.model_id = config.get("model", "llama-3.3-70b-versatile")
 
     def generate_edl(
         self, 

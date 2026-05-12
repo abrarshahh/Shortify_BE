@@ -1,0 +1,26 @@
+# Configuration for Shortify AI Agents
+# Supports switching between providers and models
+
+rhythm_engineer:
+  provider: "librosa" # librosa is local, no API needed
+  model: "default"
+
+media_analyst:
+  provider: "google"
+  primary_model: "gemini-1.5-flash"
+  fallback_models:
+    - "gemini-1.5-flash-8b"
+    - "gemini-2.0-flash-exp"
+
+creative_director:
+  provider: "groq"
+  model: "llama-3.3-70b-versatile"
+
+subtitle_agent:
+  provider: "openai-whisper" # Local whisper
+  model_size: "base"
+  device: "cpu"
+
+safety_reviewer:
+  provider: "rule-based" # Local logic
+  model: "safe-zone-v1"

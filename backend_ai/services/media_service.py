@@ -6,6 +6,7 @@ from google.genai import types
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 from moviepy import VideoFileClip
+from backend_ai.core.config_loader import AGENTS_CONFIG
 
 load_dotenv()
 
@@ -17,14 +18,10 @@ class MediaAnalyst:
         
         # New Google GenAI SDK Client
         self.client = genai.Client(api_key=api_key)
-        # Using the advanced/preview models available in this environment
-        self.primary_model = "gemini-3-flash-preview"
-        self.fallback_models = [
-            "gemini-2.5-flash", 
-            "gemini-1.5-flash", 
-            "gemini-1.5-flash-8b",
-            "gemini-flash-lite-latest"
-        ]
+        # Configuration from agents_config.yaml
+        config = AGENTS_CONFIG.get("media_analyst", {})
+        self.primary_model = config.get("primary_model", "gemini-1.5-flash")
+        self.fallback_models = config.get("fallback_models", ["gemini-1.5-flash-8b"])
         
         # Cache configuration
         self.cache_dir = "data/cache/media_analysis"
