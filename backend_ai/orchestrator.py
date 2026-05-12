@@ -10,6 +10,7 @@ from backend_ai.services.media_service import MediaAnalyst
 from backend_ai.services.director_service import CreativeDirector
 from backend_ai.services.editor_service import VideoEditor
 from backend_ai.services.subtitle_service import SubtitleAgent
+from backend_ai.core.config_loader import AGENTS_CONFIG
 
 # -------------------------------------------------------------------
 # 1. Define the State
@@ -49,7 +50,13 @@ class ShortifyOrchestrator:
         self.rhythm_agent = RhythmEngineer()
         self.media_agent = MediaAnalyst()
         self.director_agent = CreativeDirector()
-        self.subtitle_agent = SubtitleAgent(model_size="base", device="cpu")
+        
+        # Subtitle config
+        sub_config = AGENTS_CONFIG.get("subtitle_agent", {})
+        self.subtitle_agent = SubtitleAgent(
+            model_size=sub_config.get("model_size", "base"),
+            device=sub_config.get("device", "cpu")
+        )
         
         # Build and compile the graph
         self.app = self._build_graph()

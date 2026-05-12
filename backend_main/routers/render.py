@@ -67,7 +67,9 @@ def run_pipeline(
         # Update project in DB with last output path
         db = SessionLocal()
         try:
-            proj = db.query(Project).filter(Project.id == project_id).first()
+            # Cast project_id to UUID for correct comparison in Postgres
+            pid_uuid = uuid.UUID(project_id)
+            proj = db.query(Project).filter(Project.id == pid_uuid).first()
             if proj:
                 # Save as relative path to STORAGE_ROOT
                 rel_path = str(os.path.relpath(final_video, STORAGE_ROOT))
@@ -90,6 +92,17 @@ def run_pipeline(
             "status": "error",
             "message": str(e),
         }
+    finally:
+        # Reset is_rendering flag in DB
+        db = SessionLocal()
+        try:
+            pid_uuid = uuid.UUID(project_id)
+            proj = db.query(Project).filter(Project.id == pid_uuid).first()
+            if proj:
+                proj.is_rendering = False
+                db.commit()
+        finally:
+            db.close()
 
 @router.post("/{project_id}/render", response_model=RenderResponse, status_code=202)
 def trigger_render(
@@ -137,9 +150,13 @@ def trigger_render(
             if os.path.exists(candidate):
                 music_path = candidate
 
-    existing = render_jobs.get(str(project_id), {})
-    if existing.get("status") == "running":
-        raise HTTPException(409, "A render is already in progress.")
+    # Concurrency check via DB flag
+    if project.is_rendering:
+        raise HTTPException(409, f"Project '{project.title}' is already rendering. Please wait for it to complete.")
+
+    # Set rendering flag
+    project.is_rendering = True
+    db.commit()
 
     background_tasks.add_task(
         run_pipeline,

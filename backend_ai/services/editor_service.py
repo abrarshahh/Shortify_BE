@@ -10,7 +10,7 @@ from moviepy import (
     TextClip,
 )
 from moviepy.audio.fx import MultiplyVolume
-from moviepy.video.fx import CrossFadeIn, Resize
+from moviepy.video.fx import CrossFadeIn, Resize, MultiplySpeed
 
 
 class VideoEditor:
@@ -21,7 +21,7 @@ class VideoEditor:
     for transitions, pacing styles, and audio ducking.
     """
 
-    ORIGINAL_AUDIO_VOLUME = 0.1   # Duck original clip audio when music plays
+    ORIGINAL_AUDIO_VOLUME = 0.3   # Duck original clip audio when music plays
     MUSIC_VOLUME = 0.9
     DEFAULT_FADE_DURATION = 0.3
 
@@ -121,9 +121,7 @@ class VideoEditor:
             # 2b. Apply pacing style (speed multiplier)
             speed = self.PACING_SPEED.get(pacing, 1.0)
             if speed != 1.0:
-                clip = clip.with_effects([
-                    __import__("moviepy.video.fx", fromlist=["MultiplySpeed"]).MultiplySpeed(speed)
-                ])
+                clip = clip.with_effects([MultiplySpeed(speed)])
 
             # 3. Match timeline duration exactly
             target_duration = round(tl_end - tl_start, 4)
@@ -133,9 +131,7 @@ class VideoEditor:
                 if clip.duration < target_duration:
                     speed_factor = clip.duration / target_duration
                     if speed_factor >= 0.5:
-                        clip = clip.with_effects([
-                            __import__("moviepy.video.fx", fromlist=["MultiplySpeed"]).MultiplySpeed(speed_factor)
-                        ])
+                        clip = clip.with_effects([MultiplySpeed(speed_factor)])
                     clip = clip.with_duration(target_duration)
                 else:
                     clip = clip.with_duration(target_duration)

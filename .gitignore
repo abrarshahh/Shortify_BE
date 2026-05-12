@@ -123,6 +123,7 @@ uploads/
 storage/
 
 # data
+architectural_answers.md
 plan.md
 data/
 testing_data/

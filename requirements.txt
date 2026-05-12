@@ -45,7 +45,7 @@ urllib3==2.5.0
 uvicorn==0.38.0
 watchfiles==1.1.1
 websockets==15.0.1
-google-generativeai
+google-genai
 groq
 moviepy
 librosa
@@ -53,3 +53,8 @@ langgraph
 openai-whisper
 langchain-groq
 langchain-google-genai
+scipy
+ffmpeg-python
+Pillow
+numpy
+argon2-cffi
