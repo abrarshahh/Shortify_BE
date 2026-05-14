@@ -210,11 +210,23 @@ class ShortifyOrchestrator:
     def node_burn_subtitles(self, state: AgentState) -> Dict:
         print("\n--- NODE: burn_subtitles ---")
         
+        prompt_lower = state["project_title"].lower()
+        requires_subtitles = any(k in prompt_lower for k in ["subtitle", "caption", "text"])
+        
         video_path = state["rendered_video_path"]
+        final_output = os.path.join(self.exports_dir, state["output_filename"])
+        
+        if not requires_subtitles:
+            print("Subtitles not explicitly requested. Skipping transcription and burning.")
+            import shutil
+            shutil.copy(video_path, final_output)
+            return {
+                "transcription": {},
+                "final_video_path": final_output
+            }
+
         print(f"Transcribing audio for {video_path}...")
         transcription = self.subtitle_agent.transcribe(video_path)
-        
-        final_output = os.path.join(self.exports_dir, state["output_filename"])
         
         if transcription["captions"]:
             print(f"Burning subtitles to {final_output}...")

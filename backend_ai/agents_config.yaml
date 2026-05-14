@@ -7,9 +7,9 @@ rhythm_engineer:
 
 media_analyst:
   provider: "google"
-  primary_model: "gemini-1.5-flash"
+  primary_model: "gemini-2.5-flash"
   fallback_models:
-    - "gemini-2.5-flash"
+    - "gemini-3-flash-preview"
     - "gemini-flash-lite-latest"
 
 creative_director:
@@ -20,6 +20,12 @@ subtitle_agent:
   provider: "openai-whisper" # Local whisper
   model_size: "base"
   device: "cpu"
+
+video_editor:
+  provider: "local"
+  default_fade_duration: 0.3
+  original_audio_volume: 0.3
+  music_volume: 0.9
 
 safety_reviewer:
   provider: "rule-based" # Local logic

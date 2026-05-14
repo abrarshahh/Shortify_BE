@@ -117,8 +117,11 @@ class MediaAnalyst:
               "start": float,
               "end": float,
               "description": "Why this segment is visually or audibly interesting",
+              "priority_score": float (1-10, rate the overall value/importance of this segment),
               "energy_score": float (0-1),
-              "is_hook": boolean
+              "is_hook": boolean,
+              "should_be_used": boolean,
+              "segment_focus": "string (STRICTLY ONE SINGLE WORD describing the main focus, e.g., mountain, person, river, snow)"
             }
           ],
           "all_segments": [
@@ -126,13 +129,16 @@ class MediaAnalyst:
               "start": float,
               "end": float,
               "description": "Detailed visual description of what is happening in this segment",
-              "audio_description": "What is heard in this segment"
+              "audio_description": "What is heard in this segment",
+              "priority_score": float (1-10, rate the overall aesthetic and narrative value of this segment),
+              "should_be_used": boolean (True if this segment is highly recommended for the final video),
+              "segment_focus": "string (STRICTLY ONE SINGLE WORD describing the main subject or theme)"
             }
           ]
         }
         
         Important Instructions:
-        1. "all_segments": Break the ENTIRE video down into chronological, sequential segments. Each segment MUST be approximately 5 to 8 seconds long.
+        1. "all_segments": Break the ENTIRE video down into chronological, sequential segments. Let the natural action dictate the duration of each segment. Segment the video at natural boundaries such as camera cuts, changes in scene, or major shifts in action/subject. A segment can be short or long depending on the action. Give each segment a priority_score based on how useful it would be for a highlight reel.
         2. "captions": Accurately transcribe any speech heard in the video into the captions list.
         3. Do not include any markdown formatting or extra text. Only return the raw JSON object.
         """

@@ -50,7 +50,7 @@ class CreativeDirector:
                 "filename": analysis.get("file_metadata", {}).get("filename"),
                 "duration": analysis.get("file_metadata", {}).get("duration_seconds"),
                 "summary": analysis.get("summary"),
-                "hooks": [s for s in analysis.get("interesting_segments", []) if s.get("is_hook")],
+                "highlights": analysis.get("interesting_segments", []),
                 "segments": analysis.get("all_segments", [])
             }
             context["available_clips"].append(clip_info)
@@ -82,8 +82,8 @@ class CreativeDirector:
               "end_in_clip": float,
               "timeline_start": float,
               "timeline_end": float,
-              "transition": "none | fade | crossfade | slide_left | slide_right | zoom_in | zoom_out | glitch",
-              "text_overlay": "On-screen text",
+              "transition": "none | jump_cut | crossfade | dip_to_black | slide_left | slide_right | zoom_in | zoom_out | glitch",
+              "text_overlay": "On-screen text (leave empty unless explicitly requested)",
               "details": {{
                 "visual_cue": "Specific action to focus on",
                 "sound_design": "SFX (e.g., 'whoosh', 'bass drop')",
@@ -96,9 +96,24 @@ class CreativeDirector:
         RULES:
         - SEQUENTIAL ORDER: 'timeline_start' must strictly increase. No overlapping clips.
         - NO REPETITION: Avoid using the same clip twice in a row. Use different clips to maintain visual interest.
-        - DURATION MATCH: Ensure 'timeline_end - timeline_start' is roughly equal to 'end_in_clip - start_in_clip'.
+        - USER INTENT IS SUPREME: You MUST follow the User Intent perfectly. If the user asks for a specific scene, action, or chronological order, you must provide it exactly as requested, even if the priority_score is lower.
+        - SMART CLIP SELECTION (STRICT CASCADE LOGIC): You MUST select clips using this exact priority sequence:
+          1. FIRST, only look at segments from the 'highlights' array.
+          2. FILTER by 'should_be_used': prioritize segments where 'should_be_used' is true.
+          3. MATCH FOCUS: Ensure that the 'segment_focus' is consistent across the selected clips (e.g., if the main theme is 'mountain', try to pick other 'mountain' clips).
+          4. If you still need more duration to hit the target, fall back to the 'segments' array and apply the exact same logic (highest priority_score, should_be_used: true, matching focus).
+        - EXACT DURATION REQUIRED: You MUST calculate the total video length. The sum of all clip durations ('end_in_clip' - 'start_in_clip') MUST EXACTLY equal {target_duration} seconds.
+        - DURATION MATCH: Ensure 'timeline_end - timeline_start' is exactly equal to 'end_in_clip - start_in_clip' for each clip.
         - MUSIC SELECTION: Use 'music_start_offset' to pick a good starting point from the audio track (e.g., an energy segment).
-        - TRANSITIONS: Only add transitions if it improves the flow. Use 'none' for most cuts.
+        - TEXT OVERLAYS: Only provide a 'text_overlay' if the user explicitly requests on-screen text, captions, or subtitles. Otherwise, it MUST be an empty string ("").
+        - TRANSITIONS: Choose transitions deliberately based on style and narrative moment:
+          - 'none' or 'jump_cut': default for fast_cut style, high energy sequences, beat-sync cuts. Never use crossfade on beat-sync cuts.
+          - 'crossfade': smooth scene changes, travel style, when two clips share similar mood or color.
+          - 'dip_to_black': dramatic scene breaks, time jumps, emotional pauses, cinematic style chapter markers.
+          - 'zoom_in': push into an action moment, build tension before a reveal.
+          - 'zoom_out': pull back after a climax, reveal scale or context.
+          - 'slide_left' or 'slide_right': travel style, geographic transitions, before/after comparisons.
+          - 'glitch': sparingly for fast_cut or dramatic style, maximum one or two times per reel.
         - BEAT SYNC: Try to align 'timeline_end' of clips with 'audio_rhythm' beats if possible.
         - Only use 'clip_name' from 'available_clips'.
         - Only return the JSON object.
