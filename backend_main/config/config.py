@@ -12,8 +12,8 @@ database_url=os.getenv("DATABASE_URL")
 
 
 DATABASE_URL = database_url
-SECRET_KEY = "supersecret"
-ALGORITHM = "HS256"
+SECRET_KEY = os.getenv("SECRET_KEY")
+ALGORITHM = os.getenv("ALGORITHM")
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
