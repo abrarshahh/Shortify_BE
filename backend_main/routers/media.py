@@ -6,7 +6,7 @@ from backend_main.config import SessionLocal, logger, STORAGE_ROOT
 from backend_main.models import Project, MediaAsset, User, ProjectMediaAsset
 from backend_main.auth import get_current_user
 from backend_main.schemas import MediaResponse, UploadResponse, MediaLinkRequest
-from backend_main.utils import save_upload_file, validate_file
+from backend_main.config import save_upload_file, validate_file
 
 router = APIRouter(prefix="/media", tags=["Media"])
 
