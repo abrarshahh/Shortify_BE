@@ -211,7 +211,10 @@ class ShortifyOrchestrator:
         print("\n--- NODE: burn_subtitles ---")
         
         prompt_lower = state["project_title"].lower()
-        requires_subtitles = any(k in prompt_lower for k in ["subtitle", "caption", "text"])
+        # Make subtitles opt-out by default since they are standard on Reels/TikTok
+        requires_subtitles = not any(k in prompt_lower for k in [
+            "no subtitle", "no caption", "without subtitle", "without caption", "remove subtitle"
+        ])
         
         video_path = state["rendered_video_path"]
         final_output = os.path.join(self.exports_dir, state["output_filename"])

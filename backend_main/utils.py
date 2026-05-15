@@ -1,7 +1,7 @@
 import os, uuid
 from pathlib import Path
 from fastapi import UploadFile, HTTPException
-from .config import STORAGE_ROOT
+from backend_main.config import STORAGE_ROOT
 
 # Extensions that browsers / curl may not label with a proper MIME type
 _ALLOWED_EXTENSIONS = {

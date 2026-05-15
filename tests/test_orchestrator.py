@@ -29,6 +29,10 @@ def test_orchestrator():
         "video_paths": [target_video],
         "music_path": music_path,
         "project_title": "A short, motivational TikTok about a hiker struggling in deep snow. Make it highly engaging with fast pacing.",
+        "output_filename": "test_output.mp4",
+        "target_duration": 15,
+        "aspect_ratio": "9:16",
+        "style": "cinematic",
         
         # Initialize empty outputs
         "rhythm_data": {},
