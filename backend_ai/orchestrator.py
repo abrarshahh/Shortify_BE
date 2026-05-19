@@ -11,6 +11,7 @@ from backend_ai.services.director_service import CreativeDirector
 from backend_ai.services.editor_service import VideoEditor
 from backend_ai.services.subtitle_service import SubtitleAgent
 from backend_ai.services.color_service import ColorGradingAgent
+from backend_ai.services.analyst_service import ProjectAnalystAgent
 from backend_ai.core.config_loader import AGENTS_CONFIG
 
 # -------------------------------------------------------------------
@@ -37,6 +38,7 @@ class AgentState(TypedDict):
     transcription: Dict[str, Any]
     final_video_path: str
     retry_count: int
+    pre_flight_report: Dict[str, Any]
 
 
 class ShortifyOrchestrator:
@@ -54,6 +56,7 @@ class ShortifyOrchestrator:
         self.director_agent = CreativeDirector()
         
         self.color_grading_agent = ColorGradingAgent()
+        self.analyst_agent = ProjectAnalystAgent()
         
         # Subtitle config
         sub_config = AGENTS_CONFIG.get("subtitle_agent", {})
@@ -70,6 +73,7 @@ class ShortifyOrchestrator:
 
         # Add nodes
         workflow.add_node("analyze_rhythm", self.node_analyze_rhythm)
+        workflow.add_node("pre_flight_check", self.node_pre_flight_check)
         workflow.add_node("analyze_media", self.node_analyze_media)
         workflow.add_node("generate_edl", self.node_generate_edl)
         workflow.add_node("render_video", self.node_render_video)
@@ -78,7 +82,8 @@ class ShortifyOrchestrator:
         workflow.add_node("burn_subtitles", self.node_burn_subtitles)
 
         # Set edges
-        workflow.set_entry_point("analyze_rhythm")
+        workflow.set_entry_point("pre_flight_check")
+        workflow.add_edge("pre_flight_check", "analyze_rhythm")
         workflow.add_edge("analyze_rhythm", "analyze_media")
         workflow.add_edge("analyze_media", "generate_edl")
         workflow.add_edge("generate_edl", "render_video")
@@ -102,6 +107,22 @@ class ShortifyOrchestrator:
     # -------------------------------------------------------------------
     # 2. Node Functions
     # -------------------------------------------------------------------
+
+    def node_pre_flight_check(self, state: AgentState) -> Dict:
+        print("\n--- NODE: pre_flight_check ---")
+        report = self.analyst_agent.analyze_inputs(state["video_paths"])
+        
+        # If all files failed validation, abort pipeline
+        if report["valid_files"] == 0:
+            raise ValueError(
+                "Pipeline aborted: None of the input files passed pre-flight validation. "
+                f"Rejected reasons: {[r['reason'] for r in report['rejected_files']]}"
+            )
+            
+        return {
+            "video_paths": report["recommended_order"],
+            "pre_flight_report": report
+        }
 
     def node_analyze_rhythm(self, state: AgentState) -> Dict:
         print("\n--- NODE: analyze_rhythm ---")

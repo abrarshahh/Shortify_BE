@@ -44,7 +44,8 @@ def test_orchestrator():
         "safe_zone_report": {},
         "transcription": {},
         "final_video_path": "",
-        "retry_count": 0
+        "retry_count": 0,
+        "pre_flight_report": {}
     }
     
     # 3. Run the Orchestrator

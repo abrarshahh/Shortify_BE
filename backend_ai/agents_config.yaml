@@ -31,6 +31,12 @@ color_grading:
   enabled: true
   ffmpeg_path: "ffmpeg"
 
+project_analyst:
+  provider: "local"
+  min_video_duration: 1.0
+  frame_sample_count: 5
+  sharpness_divisor: 500.0
+
 safety_reviewer:
   provider: "rule-based" # Local logic
   model: "safe-zone-v1"

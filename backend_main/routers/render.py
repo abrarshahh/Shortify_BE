@@ -55,6 +55,7 @@ def run_pipeline(
             "transcription": {},
             "final_video_path": "",
             "retry_count": 0,
+            "pre_flight_report": {},
         }
 
         orchestrator = ShortifyOrchestrator(
