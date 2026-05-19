@@ -4,6 +4,7 @@ from typing import Dict, Any, Optional
 
 from moviepy import (
     VideoFileClip,
+    ImageClip,
     AudioFileClip,
     CompositeVideoClip,
     CompositeAudioClip,
@@ -31,6 +32,8 @@ class VideoEditor:
         "cinematic-slow": 0.75,
     }
 
+    IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif"}
+
     def __init__(self, clips_dir: str, output_dir: str = "data/exports"):
         self.clips_dir = clips_dir
         self.output_dir = output_dir
@@ -55,6 +58,40 @@ class VideoEditor:
             if os.path.exists(path):
                 return path
         raise FileNotFoundError("No suitable font found. Please ensure Arial or Calibri is installed.")
+
+    def _apply_ken_burns(
+        self,
+        clip: "ImageClip",
+        direction: str = "in",
+        zoom_range: tuple = (1.0, 1.08)
+    ) -> "ImageClip":
+        """
+        Applies a slow zoom (Ken Burns effect) to a static ImageClip.
+
+        This gives photos motion so they do not appear as frozen frames
+        in the final reel. The zoom is applied as a time-varying Resize
+        effect over the full duration of the clip.
+
+        Args:
+            clip:       An ImageClip that already has a duration set.
+            direction:  'in' zooms in slowly, 'out' zooms out slowly.
+            zoom_range: (start_scale, end_scale) tuple. Default is 1.0 to 1.08
+                        which is a subtle 8% zoom — noticeable but not jarring.
+
+        Returns:
+            The same clip with a Resize effect applied.
+        """
+        start_scale, end_scale = zoom_range
+        if direction == "out":
+            start_scale, end_scale = zoom_range[1], zoom_range[0]
+
+        d = clip.duration
+
+        def zoom_factor(t):
+            progress = t / d if d > 0 else 0
+            return start_scale + (end_scale - start_scale) * progress
+
+        return clip.with_effects([Resize(zoom_factor)])
 
     # ------------------------------------------------------------------
     # Timeline Assembly
@@ -239,14 +276,28 @@ class VideoEditor:
                 print(f"  Warning: clip not found, skipping -> {clip_name}")
                 continue
 
-            # 1. Load & trim from source
-            raw = VideoFileClip(clip_path)
-            safe_end = min(end_in, raw.duration)
-            if safe_end <= start_in:
-                print(f"  Warning: invalid time range for {clip_name}, skipping.")
-                raw.close()
-                continue
-            clip = raw.subclipped(start_in, safe_end)
+            # 1. Load & trim from source — route images to ImageClip
+            ext = os.path.splitext(clip_path)[1].lower()
+            is_image = ext in self.IMAGE_EXTENSIONS
+
+            if is_image:
+                # Images have no duration of their own. Use the director's
+                # specified timeline duration as the display duration.
+                target_duration = round(tl_end - tl_start, 4)
+                if target_duration <= 0:
+                    target_duration = 3.0  # fallback: 3 seconds for photos
+                    print(f"  Warning: no valid duration for image {clip_name}, defaulting to 3s.")
+                raw = ImageClip(clip_path, duration=target_duration)
+                clip = raw
+                safe_end = target_duration  # used in logging below
+            else:
+                raw = VideoFileClip(clip_path)
+                safe_end = min(end_in, raw.duration)
+                if safe_end <= start_in:
+                    print(f"  Warning: invalid time range for {clip_name}, skipping.")
+                    raw.close()
+                    continue
+                clip = raw.subclipped(start_in, safe_end)
 
             # 2. Resize and Center-Crop to 9:16 (1080x1920)
             target_w, target_h = 1080, 1920
@@ -264,15 +315,25 @@ class VideoEditor:
             y1 = (new_h - target_h) // 2
             clip = clip.cropped(x1=x1, y1=y1, width=target_w, height=target_h)
 
-            # 3. Apply pacing style (speed multiplier)
-            speed = self.PACING_SPEED.get(pacing, 1.0)
-            if speed != 1.0:
-                clip = clip.with_effects([MultiplySpeed(speed)])
+            # 3. Apply pacing style (speed multiplier — videos only)
+            if not is_image:
+                speed = self.PACING_SPEED.get(pacing, 1.0)
+                if speed != 1.0:
+                    clip = clip.with_effects([MultiplySpeed(speed)])
 
-            # 4. Match director-specified duration (trim only, never extend)
-            target_duration = round(tl_end - tl_start, 4)
-            if target_duration > 0 and clip.duration > target_duration:
-                clip = clip.subclipped(0, target_duration)
+            # 4. Match director-specified duration
+            # For videos: trim if over. For images: duration already set at load time.
+            if not is_image:
+                target_duration = round(tl_end - tl_start, 4)
+                if target_duration > 0 and clip.duration > target_duration:
+                    clip = clip.subclipped(0, target_duration)
+
+            # 4b. Apply Ken Burns effect to photos
+            # Direction alternates per clip to add visual variety:
+            # even-indexed clips zoom in, odd-indexed clips zoom out.
+            if is_image:
+                kb_direction = "in" if i % 2 == 0 else "out"
+                clip = self._apply_ken_burns(clip, direction=kb_direction)
 
             # 5. Duck original clip audio
             if clip.audio is not None:
@@ -315,9 +376,9 @@ class VideoEditor:
             processed_clips.append(clip)
             transitions.append(transition)
 
+            media_type_label = "photo" if is_image else "video"
             print(
-                f"  [{i+1}/{len(timeline)}] {clip_name} | "
-                f"src {start_in:.2f}-{safe_end:.2f}s | "
+                f"  [{i+1}/{len(timeline)}] [{media_type_label}] {clip_name} | "
                 f"dur {clip.duration:.2f}s | "
                 f"transition: {transition} | pacing: {pacing}"
             )

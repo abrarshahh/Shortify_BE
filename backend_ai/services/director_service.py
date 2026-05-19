@@ -115,6 +115,11 @@ class CreativeDirector:
           - 'slide_left' or 'slide_right': travel style, geographic transitions, before/after comparisons.
           - 'glitch': sparingly for fast_cut or dramatic style, maximum one or two times per reel.
         - BEAT SYNC: Try to align 'timeline_end' of clips with 'audio_rhythm' beats if possible.
+        - PHOTO HANDLING: For clips where 'duration_seconds' is null in file_metadata, the clip is a photo.
+          Photos have no inherent duration. You MUST assign a 'timeline_end - timeline_start' between 2.0
+          and 5.0 seconds for photos. Photos pair well with 'dip_to_black' or 'crossfade' transitions.
+          Never assign 'speed-ramp' or 'cinematic-slow' pacing to photos since they have no video to ramp.
+          Use 'jump-cut' as the pacing_style for all photos.
         - Only use 'clip_name' from 'available_clips'.
         - Only return the JSON object.
         """

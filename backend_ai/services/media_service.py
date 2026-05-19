@@ -36,25 +36,49 @@ class MediaAnalyst:
         cache_key = hashlib.md5(fingerprint.encode()).hexdigest()
         return os.path.join(self.cache_dir, f"{cache_key}.json")
 
+    # Image extensions that cannot be opened by VideoFileClip
+    _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif"}
+
     def _get_file_metadata(self, file_path: str) -> Dict[str, Any]:
         """
-        Extracts technical metadata from the file locally using MoviePy.
+        Extracts technical metadata from the file locally.
+        Routes image files to PIL and video files to MoviePy.
         """
+        ext = os.path.splitext(file_path)[1].lower()
+        is_image = ext in self._IMAGE_EXTENSIONS
+
         try:
-            with VideoFileClip(file_path) as clip:
+            if is_image:
+                from PIL import Image as PILImage
+                with PILImage.open(file_path) as img:
+                    width, height = img.size
                 return {
                     "filename": os.path.basename(file_path),
                     "file_size_mb": round(os.path.getsize(file_path) / (1024 * 1024), 2),
-                    "duration_seconds": round(clip.duration, 2),
-                    "resolution": {
-                        "width": clip.size[0],
-                        "height": clip.size[1]
-                    },
-                    "aspect_ratio": round(clip.size[0] / clip.size[1], 2),
-                    "fps": round(clip.fps, 2),
-                    "has_audio": clip.audio is not None,
-                    "extension": os.path.splitext(file_path)[1].lower()
+                    "duration_seconds": None,  # photos have no duration
+                    "resolution": {"width": width, "height": height},
+                    "aspect_ratio": round(width / height, 2),
+                    "fps": None,
+                    "has_audio": False,
+                    "extension": ext,
+                    "media_type": "photo"
                 }
+            else:
+                with VideoFileClip(file_path) as clip:
+                    return {
+                        "filename": os.path.basename(file_path),
+                        "file_size_mb": round(os.path.getsize(file_path) / (1024 * 1024), 2),
+                        "duration_seconds": round(clip.duration, 2),
+                        "resolution": {
+                            "width": clip.size[0],
+                            "height": clip.size[1]
+                        },
+                        "aspect_ratio": round(clip.size[0] / clip.size[1], 2),
+                        "fps": round(clip.fps, 2),
+                        "has_audio": clip.audio is not None,
+                        "extension": ext,
+                        "media_type": "video"
+                    }
         except Exception as e:
             print(f"Error extracting file metadata: {e}")
             return {"error": f"Could not extract technical metadata: {str(e)}"}
@@ -77,7 +101,9 @@ class MediaAnalyst:
             except Exception as e:
                 print(f"Error reading cache: {e}")
 
-        print(f"Uploading video to Gemini: {file_path}")
+        ext = os.path.splitext(file_path)[1].lower()
+        is_image = ext in self._IMAGE_EXTENSIONS
+        print(f"Uploading {'image' if is_image else 'video'} to Gemini: {file_path}")
         
         # Upload using the new SDK (file is the correct argument)
         video_file = self.client.files.upload(file=file_path)
@@ -93,55 +119,103 @@ class MediaAnalyst:
 
         print(f"Video processed successfully: {video_file.name}")
 
-        prompt = """
-        Analyze this video for a short-form content editor. Listen to the audio track and watch the visual track carefully.
-        
-        Output MUST be a valid JSON object with the following structure:
-        {
-          "summary": "Complete and detailed summary of the entire video content",
-          "mood": "Overall visual and thematic mood (e.g., Energetic, Calm, Dark, Vibrant)",
-          "lighting": "Detailed description of lighting conditions",
-          "subjects": ["Detailed list of main subjects, people, or objects in the video"],
-          "inferred_metadata": {
-             "inferred_location": "Inferred location if applicable",
-             "time_of_day": "Inferred time of day",
-             "camera_movement": "Description of camera movement (e.g., static, handheld, panning)"
-          },
-          "audio": {
-             "captions": ["List of transcribed spoken sentences/captions extracted from the audio, if any. Keep chronological."],
-             "audio_mood": "Overall mood of the audio/music/speech",
-             "audio_features": "Description of audio elements (e.g., background noise, music genre, sound effects)"
-          },
-          "interesting_segments": [
+        if is_image:
+            prompt = """
+            Analyze this photo for a short-form content editor.
+
+            Output MUST be a valid JSON object with the following structure:
             {
-              "start": float,
-              "end": float,
-              "description": "Why this segment is visually or audibly interesting",
-              "priority_score": float (1-10, rate the overall value/importance of this segment),
-              "energy_score": float (0-1),
-              "is_hook": boolean,
-              "should_be_used": boolean,
-              "segment_focus": "string (STRICTLY ONE SINGLE WORD describing the main focus, e.g., mountain, person, river, snow)"
+              "summary": "Detailed description of the photo content",
+              "mood": "Visual mood (e.g., Energetic, Calm, Dark, Vibrant)",
+              "lighting": "Description of lighting conditions",
+              "subjects": ["List of main subjects or objects visible"],
+              "inferred_metadata": {
+                 "inferred_location": "Inferred location if applicable",
+                 "time_of_day": "Inferred time of day",
+                 "camera_movement": "static"
+              },
+              "audio": {
+                 "captions": [],
+                 "audio_mood": "none",
+                 "audio_features": "none"
+              },
+              "interesting_segments": [
+                {
+                  "start": 0.0,
+                  "end": 3.0,
+                  "description": "The entire photo — describe the most visually compelling aspect",
+                  "priority_score": 8.0,
+                  "energy_score": 0.7,
+                  "is_hook": true,
+                  "should_be_used": true,
+                  "segment_focus": "one word describing the main subject"
+                }
+              ],
+              "all_segments": [
+                {
+                  "start": 0.0,
+                  "end": 3.0,
+                  "description": "Full description of the photo",
+                  "audio_description": "none",
+                  "priority_score": 8.0,
+                  "should_be_used": true,
+                  "segment_focus": "one word describing the main subject"
+                }
+              ]
             }
-          ],
-          "all_segments": [
+
+            Important: Only return the raw JSON object. No markdown.
+            """
+        else:
+            prompt = """
+            Analyze this video for a short-form content editor. Listen to the audio track and watch the visual track carefully.
+            
+            Output MUST be a valid JSON object with the following structure:
             {
-              "start": float,
-              "end": float,
-              "description": "Detailed visual description of what is happening in this segment",
-              "audio_description": "What is heard in this segment",
-              "priority_score": float (1-10, rate the overall aesthetic and narrative value of this segment),
-              "should_be_used": boolean (True if this segment is highly recommended for the final video),
-              "segment_focus": "string (STRICTLY ONE SINGLE WORD describing the main subject or theme)"
+              "summary": "Complete and detailed summary of the entire video content",
+              "mood": "Overall visual and thematic mood (e.g., Energetic, Calm, Dark, Vibrant)",
+              "lighting": "Detailed description of lighting conditions",
+              "subjects": ["Detailed list of main subjects, people, or objects in the video"],
+              "inferred_metadata": {
+                 "inferred_location": "Inferred location if applicable",
+                 "time_of_day": "Inferred time of day",
+                 "camera_movement": "Description of camera movement (e.g., static, handheld, panning)"
+              },
+              "audio": {
+                 "captions": ["List of transcribed spoken sentences/captions extracted from the audio, if any. Keep chronological."],
+                 "audio_mood": "Overall mood of the audio/music/speech",
+                 "audio_features": "Description of audio elements (e.g., background noise, music genre, sound effects)"
+              },
+              "interesting_segments": [
+                {
+                  "start": float,
+                  "end": float,
+                  "description": "Why this segment is visually or audibly interesting",
+                  "priority_score": float (1-10, rate the overall value/importance of this segment),
+                  "energy_score": float (0-1),
+                  "is_hook": boolean,
+                  "should_be_used": boolean,
+                  "segment_focus": "string (STRICTLY ONE SINGLE WORD describing the main focus, e.g., mountain, person, river, snow)"
+                }
+              ],
+              "all_segments": [
+                {
+                  "start": float,
+                  "end": float,
+                  "description": "Detailed visual description of what is happening in this segment",
+                  "audio_description": "What is heard in this segment",
+                  "priority_score": float (1-10, rate the overall aesthetic and narrative value of this segment),
+                  "should_be_used": boolean (True if this segment is highly recommended for the final video),
+                  "segment_focus": "string (STRICTLY ONE SINGLE WORD describing the main subject or theme)"
+                }
+              ]
             }
-          ]
-        }
-        
-        Important Instructions:
-        1. "all_segments": Break the ENTIRE video down into chronological, sequential segments. Let the natural action dictate the duration of each segment. Segment the video at natural boundaries such as camera cuts, changes in scene, or major shifts in action/subject. A segment can be short or long depending on the action. Give each segment a priority_score based on how useful it would be for a highlight reel.
-        2. "captions": Accurately transcribe any speech heard in the video into the captions list.
-        3. Do not include any markdown formatting or extra text. Only return the raw JSON object.
-        """
+            
+            Important Instructions:
+            1. "all_segments": Break the ENTIRE video down into chronological, sequential segments. Let the natural action dictate the duration of each segment. Segment the video at natural boundaries such as camera cuts, changes in scene, or major shifts in action/subject. A segment can be short or long depending on the action. Give each segment a priority_score based on how useful it would be for a highlight reel.
+            2. "captions": Accurately transcribe any speech heard in the video into the captions list.
+            3. Do not include any markdown formatting or extra text. Only return the raw JSON object.
+            """
 
         # Generate content using the new SDK with model fallback and exponential backoff
         all_models = [self.primary_model] + self.fallback_models
