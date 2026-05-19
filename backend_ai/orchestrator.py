@@ -10,6 +10,7 @@ from backend_ai.services.media_service import MediaAnalyst
 from backend_ai.services.director_service import CreativeDirector
 from backend_ai.services.editor_service import VideoEditor
 from backend_ai.services.subtitle_service import SubtitleAgent
+from backend_ai.services.color_service import ColorGradingAgent
 from backend_ai.core.config_loader import AGENTS_CONFIG
 
 # -------------------------------------------------------------------
@@ -31,6 +32,7 @@ class AgentState(TypedDict):
     edl_feedback: str
     
     rendered_video_path: str
+    color_graded_path: str
     safe_zone_report: Dict[str, Any]
     transcription: Dict[str, Any]
     final_video_path: str
@@ -51,6 +53,8 @@ class ShortifyOrchestrator:
         self.media_agent = MediaAnalyst()
         self.director_agent = CreativeDirector()
         
+        self.color_grading_agent = ColorGradingAgent()
+        
         # Subtitle config
         sub_config = AGENTS_CONFIG.get("subtitle_agent", {})
         self.subtitle_agent = SubtitleAgent(
@@ -69,6 +73,7 @@ class ShortifyOrchestrator:
         workflow.add_node("analyze_media", self.node_analyze_media)
         workflow.add_node("generate_edl", self.node_generate_edl)
         workflow.add_node("render_video", self.node_render_video)
+        workflow.add_node("color_grade", self.node_color_grade)
         workflow.add_node("review_safety", self.node_review_safety)
         workflow.add_node("burn_subtitles", self.node_burn_subtitles)
 
@@ -77,7 +82,8 @@ class ShortifyOrchestrator:
         workflow.add_edge("analyze_rhythm", "analyze_media")
         workflow.add_edge("analyze_media", "generate_edl")
         workflow.add_edge("generate_edl", "render_video")
-        workflow.add_edge("render_video", "review_safety")
+        workflow.add_edge("render_video", "color_grade")
+        workflow.add_edge("color_grade", "review_safety")
         
         # Conditional edge based on safety check
         workflow.add_conditional_edges(
@@ -172,6 +178,21 @@ class ShortifyOrchestrator:
         
         return {"rendered_video_path": rendered_path}
 
+    def node_color_grade(self, state: AgentState) -> Dict:
+        print("\n--- NODE: color_grade ---")
+        try:
+            graded_path = self.color_grading_agent.apply_grade(
+                video_path=state["rendered_video_path"],
+                style=state["style"],
+                output_dir=self.exports_dir,
+            )
+            return {"color_graded_path": graded_path}
+        except Exception as e:
+            # Color grading is non-critical — if it fails, continue with
+            # the ungraded video rather than aborting the whole pipeline.
+            print(f"  Warning: Color grading failed, using ungraded video. Error: {e}")
+            return {"color_graded_path": state["rendered_video_path"]}
+
     def node_review_safety(self, state: AgentState) -> Dict:
         print("\n--- NODE: review_safety ---")
         edl = state["edl"]
@@ -211,12 +232,9 @@ class ShortifyOrchestrator:
         print("\n--- NODE: burn_subtitles ---")
         
         prompt_lower = state["project_title"].lower()
-        # Make subtitles opt-out by default since they are standard on Reels/TikTok
-        requires_subtitles = not any(k in prompt_lower for k in [
-            "no subtitle", "no caption", "without subtitle", "without caption", "remove subtitle"
-        ])
+        requires_subtitles = any(k in prompt_lower for k in ["subtitle", "caption", "text"])
         
-        video_path = state["rendered_video_path"]
+        video_path = state.get("color_graded_path") or state["rendered_video_path"]
         final_output = os.path.join(self.exports_dir, state["output_filename"])
         
         if not requires_subtitles:

@@ -40,6 +40,7 @@ def test_orchestrator():
         "edl": {},
         "edl_feedback": "",
         "rendered_video_path": "",
+        "color_graded_path": "",
         "safe_zone_report": {},
         "transcription": {},
         "final_video_path": "",

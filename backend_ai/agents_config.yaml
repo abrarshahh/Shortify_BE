@@ -27,6 +27,10 @@ video_editor:
   original_audio_volume: 0.3
   music_volume: 0.9
 
+color_grading:
+  enabled: true
+  ffmpeg_path: "ffmpeg"
+
 safety_reviewer:
   provider: "rule-based" # Local logic
   model: "safe-zone-v1"
