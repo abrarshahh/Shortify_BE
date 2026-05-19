@@ -4,6 +4,7 @@ from typing import List, Dict, Any
 from groq import Groq
 from dotenv import load_dotenv
 from backend_ai.core.config_loader import AGENTS_CONFIG
+from backend_ai.core.api_utils import rate_limit_guard
 
 load_dotenv()
 
@@ -17,6 +18,7 @@ class CreativeDirector:
         config = AGENTS_CONFIG.get("creative_director", {})
         self.model_id = config.get("model", "llama-3.3-70b-versatile")
 
+    @rate_limit_guard(max_retries=5)
     def generate_edl(
         self, 
         user_prompt: str, 

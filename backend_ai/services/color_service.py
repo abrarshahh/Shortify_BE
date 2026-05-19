@@ -128,6 +128,10 @@ class ColorGradingAgent:
         config = AGENTS_CONFIG.get("color_grading", {})
         self.enabled = config.get("enabled", True)
         self.ffmpeg_path = config.get("ffmpeg_path", "ffmpeg")
+        
+        # Ensure LUTs directory exists
+        self.luts_dir = os.path.abspath(os.path.join("data", "luts"))
+        os.makedirs(self.luts_dir, exist_ok=True)
 
     def _get_preset(self, style: str) -> Dict[str, float]:
         """
@@ -197,8 +201,25 @@ class ColorGradingAgent:
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Input video not found: {video_path}")
 
-        preset = self._get_preset(style)
-        filter_chain = self._build_filter_chain(preset)
+        # Check for LUT file input
+        # Case A: Style is a direct path to a .cube file
+        # Case B: Style corresponds to a .cube file in the data/luts directory
+        lut_path = None
+        if style.lower().endswith(".cube") and os.path.exists(style):
+            lut_path = os.path.abspath(style)
+        else:
+            lut_candidate = os.path.join(self.luts_dir, f"{style}.cube")
+            if os.path.exists(lut_candidate):
+                lut_path = lut_candidate
+
+        if lut_path:
+            # Escape path for FFmpeg filter on Windows
+            lut_path_escaped = lut_path.replace("\\", "/").replace(":", "\\:")
+            filter_chain = f"lut3d={lut_path_escaped}"
+            print(f"ColorGradingAgent: detected custom LUT file -> {lut_path}")
+        else:
+            preset = self._get_preset(style)
+            filter_chain = self._build_filter_chain(preset)
 
         # Build output path
         base_name = os.path.splitext(os.path.basename(video_path))[0]

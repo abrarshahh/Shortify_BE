@@ -1,5 +1,5 @@
 import os
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Callable
 from typing_extensions import TypedDict
 
 from langgraph.graph import StateGraph, END
@@ -12,6 +12,7 @@ from backend_ai.services.editor_service import VideoEditor
 from backend_ai.services.subtitle_service import SubtitleAgent
 from backend_ai.services.color_service import ColorGradingAgent
 from backend_ai.services.analyst_service import ProjectAnalystAgent
+from backend_ai.services.thumbnail_service import ThumbnailAgent
 from backend_ai.core.config_loader import AGENTS_CONFIG
 
 # -------------------------------------------------------------------
@@ -39,6 +40,7 @@ class AgentState(TypedDict):
     final_video_path: str
     retry_count: int
     pre_flight_report: Dict[str, Any]
+    progress_callback: Optional[Callable[[int, str], None]]
 
 
 class ShortifyOrchestrator:
@@ -57,6 +59,7 @@ class ShortifyOrchestrator:
         
         self.color_grading_agent = ColorGradingAgent()
         self.analyst_agent = ProjectAnalystAgent()
+        self.thumbnail_agent = ThumbnailAgent()
         
         # Subtitle config
         sub_config = AGENTS_CONFIG.get("subtitle_agent", {})
@@ -110,6 +113,10 @@ class ShortifyOrchestrator:
 
     def node_pre_flight_check(self, state: AgentState) -> Dict:
         print("\n--- NODE: pre_flight_check ---")
+        callback = state.get("progress_callback")
+        if callback:
+            callback(10, "Evaluating video clip quality...")
+            
         report = self.analyst_agent.analyze_inputs(state["video_paths"])
         
         # If all files failed validation, abort pipeline
@@ -126,6 +133,10 @@ class ShortifyOrchestrator:
 
     def node_analyze_rhythm(self, state: AgentState) -> Dict:
         print("\n--- NODE: analyze_rhythm ---")
+        callback = state.get("progress_callback")
+        if callback:
+            callback(25, "Analyzing audio beats...")
+            
         music_path = state.get("music_path")
         
         if not music_path or not os.path.exists(music_path):
@@ -138,6 +149,10 @@ class ShortifyOrchestrator:
 
     def node_analyze_media(self, state: AgentState) -> Dict:
         print("\n--- NODE: analyze_media ---")
+        callback = state.get("progress_callback")
+        if callback:
+            callback(50, "AI Media Analysis...")
+            
         visual_data = []
         for path in state["video_paths"]:
             if os.path.exists(path):
@@ -154,7 +169,10 @@ class ShortifyOrchestrator:
 
     def node_generate_edl(self, state: AgentState) -> Dict:
         print("\n--- NODE: generate_edl ---")
-        
+        callback = state.get("progress_callback")
+        if callback:
+            callback(65, "Creating storyboard and timeline...")
+            
         feedback = state.get("edl_feedback")
         
         # If we have feedback from a previous safety failure, we should inform the LLM
@@ -180,6 +198,10 @@ class ShortifyOrchestrator:
 
     def node_render_video(self, state: AgentState) -> Dict:
         print("\n--- NODE: render_video ---")
+        callback = state.get("progress_callback")
+        if callback:
+            callback(80, "Rendering video...")
+            
         # VideoEditor is instantiated per-render because it needs clips_dir.
         # We assume all clips are in the same directory as the first input path.
         if not state["video_paths"]:
@@ -201,6 +223,10 @@ class ShortifyOrchestrator:
 
     def node_color_grade(self, state: AgentState) -> Dict:
         print("\n--- NODE: color_grade ---")
+        callback = state.get("progress_callback")
+        if callback:
+            callback(90, "Applying style color grade...")
+            
         try:
             graded_path = self.color_grading_agent.apply_grade(
                 video_path=state["rendered_video_path"],
@@ -216,6 +242,10 @@ class ShortifyOrchestrator:
 
     def node_review_safety(self, state: AgentState) -> Dict:
         print("\n--- NODE: review_safety ---")
+        callback = state.get("progress_callback")
+        if callback:
+            callback(95, "Checking caption safety zones...")
+            
         edl = state["edl"]
         
         report = self.subtitle_agent.check_safe_zones(edl)
@@ -251,7 +281,10 @@ class ShortifyOrchestrator:
 
     def node_burn_subtitles(self, state: AgentState) -> Dict:
         print("\n--- NODE: burn_subtitles ---")
-        
+        callback = state.get("progress_callback")
+        if callback:
+            callback(98, "Burning dynamic subtitles...")
+            
         prompt_lower = state["project_title"].lower()
         requires_subtitles = any(k in prompt_lower for k in ["subtitle", "caption", "text"])
         
@@ -262,10 +295,24 @@ class ShortifyOrchestrator:
             print("Subtitles not explicitly requested. Skipping transcription and burning.")
             import shutil
             shutil.copy(video_path, final_output)
-            return {
-                "transcription": {},
-                "final_video_path": final_output
-            }
+        # Generate cover thumbnail for opt-out subtitles
+        try:
+            overlay_text = None
+            if state["project_title"]:
+                words = state["project_title"].split()
+                overlay_text = " ".join(words[:4])
+            self.thumbnail_agent.generate_thumbnail(
+                video_path=final_output,
+                output_dir=self.exports_dir,
+                overlay_text=overlay_text
+            )
+        except Exception as e:
+            print(f"  Warning: Cover thumbnail generation failed: {e}")
+
+        return {
+            "transcription": {},
+            "final_video_path": final_output
+        }
 
         print(f"Transcribing audio for {video_path}...")
         transcription = self.subtitle_agent.transcribe(video_path)
@@ -284,6 +331,22 @@ class ShortifyOrchestrator:
             shutil.copy(video_path, final_output)
             final_video_path = final_output
             
+        # Generate cover thumbnail for opt-in subtitles
+        try:
+            overlay_text = None
+            if transcription.get("captions"):
+                overlay_text = transcription["captions"][0]["text"]
+            elif state["project_title"]:
+                words = state["project_title"].split()
+                overlay_text = " ".join(words[:4])
+            self.thumbnail_agent.generate_thumbnail(
+                video_path=final_video_path,
+                output_dir=self.exports_dir,
+                overlay_text=overlay_text
+            )
+        except Exception as e:
+            print(f"  Warning: Cover thumbnail generation failed: {e}")
+
         return {
             "transcription": transcription,
             "final_video_path": final_video_path

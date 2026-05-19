@@ -12,99 +12,10 @@ from backend_main.models import Project, MediaAsset, User, ProjectMediaAsset
 from backend_main.auth import get_current_user
 from backend_main.schemas import OutputVideoResponse, RenderResponse, RenderRequest
 from backend_ai.orchestrator import ShortifyOrchestrator, AgentState
+from backend_main import worker_service
 
 router = APIRouter(prefix="/projects", tags=["Render"])
 
-# -------------------------------------------------------------------
-# In-memory job tracker (replace with Redis / DB in production)
-# -------------------------------------------------------------------
-render_jobs: dict = {}
-
-def run_pipeline(
-    project_id: str,
-    prompt: str,
-    video_paths: list,
-    music_path: Optional[str],
-    output_filename: str,
-    target_duration: int,
-    aspect_ratio: str,
-    style: Optional[str]
-):
-    """
-    Background task: runs the full Shortify LangGraph pipeline.
-    """
-    try:
-        logger.info(f"[{project_id}] Starting Shortify pipeline...")
-        render_jobs[project_id] = {"status": "running", "message": "Pipeline started"}
-
-        initial_state: AgentState = {
-            "video_paths": video_paths,
-            "music_path": music_path,
-            "project_title": prompt,
-            "output_filename": output_filename,
-            "target_duration": target_duration,
-            "aspect_ratio": aspect_ratio,
-            "style": style or "general",
-            "rhythm_data": {},
-            "visual_data": [],
-            "edl": {},
-            "edl_feedback": "",
-            "rendered_video_path": "",
-            "color_graded_path": "",
-            "safe_zone_report": {},
-            "transcription": {},
-            "final_video_path": "",
-            "retry_count": 0,
-            "pre_flight_report": {},
-        }
-
-        orchestrator = ShortifyOrchestrator(
-            exports_dir=str(STORAGE_ROOT / "exports" / project_id)
-        )
-        final_state = orchestrator.run(initial_state)
-
-        final_video = final_state.get("final_video_path", "")
-        verdict = final_state.get("safe_zone_report", {}).get("verdict", "N/A")
-
-        # Update project in DB with last output path
-        db = SessionLocal()
-        try:
-            # Cast project_id to UUID for correct comparison in Postgres
-            pid_uuid = uuid.UUID(project_id)
-            proj = db.query(Project).filter(Project.id == pid_uuid).first()
-            if proj:
-                # Save as relative path to STORAGE_ROOT
-                rel_path = str(os.path.relpath(final_video, STORAGE_ROOT))
-                proj.last_output_path = rel_path
-                db.commit()
-        finally:
-            db.close()
-
-        render_jobs[project_id] = {
-            "status": "done",
-            "message": "Render complete.",
-            "final_video_path": final_video,
-            "safe_zone_verdict": verdict,
-        }
-        logger.info(f"[{project_id}] Pipeline complete. Final: {final_video}")
-
-    except Exception as e:
-        logger.error(f"[{project_id}] Pipeline failed: {e}")
-        render_jobs[project_id] = {
-            "status": "error",
-            "message": str(e),
-        }
-    finally:
-        # Reset is_rendering flag in DB
-        db = SessionLocal()
-        try:
-            pid_uuid = uuid.UUID(project_id)
-            proj = db.query(Project).filter(Project.id == pid_uuid).first()
-            if proj:
-                proj.is_rendering = False
-                db.commit()
-        finally:
-            db.close()
 
 @router.post("/{project_id}/render", response_model=RenderResponse, status_code=202)
 def trigger_render(
@@ -160,8 +71,7 @@ def trigger_render(
     project.is_rendering = True
     db.commit()
 
-    background_tasks.add_task(
-        run_pipeline,
+    worker_service.enqueue_job(
         project_id=str(project_id),
         prompt=body.prompt,
         video_paths=video_paths,
@@ -175,7 +85,9 @@ def trigger_render(
     return RenderResponse(
         project_id=project_id,
         status="queued",
-        message="Render pipeline started.",
+        message="Render pipeline queued in background worker.",
+        progress_percentage=0,
+        current_step="Queued in background worker..."
     )
 
 @router.get("/{project_id}/render/status", response_model=RenderResponse)
@@ -190,12 +102,14 @@ def get_render_status(
     if project.user_id != user.id:
         raise HTTPException(403, "Forbidden")
 
-    job = render_jobs.get(str(project_id))
+    job = worker_service.render_jobs.get(str(project_id))
     if not job:
         return RenderResponse(
             project_id=project_id,
             status="not_started",
             message="No render triggered.",
+            progress_percentage=0,
+            current_step="Not started"
         )
 
     return RenderResponse(
@@ -204,6 +118,8 @@ def get_render_status(
         message=job.get("message", ""),
         final_video_path=job.get("final_video_path"),
         safe_zone_verdict=job.get("safe_zone_verdict"),
+        progress_percentage=job.get("progress_percentage", 0),
+        current_step=job.get("current_step", "Initializing...")
     )
 
 @router.get("/outputs", response_model=List[OutputVideoResponse])

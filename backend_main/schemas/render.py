@@ -16,3 +16,5 @@ class RenderResponse(BaseModel):
     message: str
     final_video_path: Optional[str] = None
     safe_zone_verdict: Optional[str] = None
+    progress_percentage: Optional[int] = 0
+    current_step: Optional[str] = "Initializing..."

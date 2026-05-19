@@ -7,6 +7,7 @@ from typing import List, Dict, Any
 from dotenv import load_dotenv
 from moviepy import VideoFileClip
 from backend_ai.core.config_loader import AGENTS_CONFIG
+from backend_ai.core.api_utils import rate_limit_guard
 
 load_dotenv()
 
@@ -83,6 +84,7 @@ class MediaAnalyst:
             print(f"Error extracting file metadata: {e}")
             return {"error": f"Could not extract technical metadata: {str(e)}"}
 
+    @rate_limit_guard(max_retries=5)
     def analyze_video(self, file_path: str) -> Dict[str, Any]:
         """
         Uploads a video to Gemini and analyzes it for key segments, hooks, and mood.

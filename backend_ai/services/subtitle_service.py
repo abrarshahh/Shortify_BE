@@ -140,9 +140,28 @@ class SubtitleAgent:
 
         text_clips = []
         for cap in captions:
-            # Find a font — try common Windows locations
             font = self._find_font()
 
+            # 1. Shadow TextClip (for gorgeous legibility on any background)
+            shadow_txt = TextClip(
+                text=cap["text"],
+                font=font,
+                font_size=font_size,
+                color="black",
+                stroke_color="black",
+                stroke_width=stroke_width + 1,
+                method="caption",
+                size=(int(w * 0.85), None),
+            )
+            shadow_txt = (
+                shadow_txt
+                .with_start(cap["start"])
+                .with_end(cap["end"])
+                .with_position(("center", y_pos + 4)) # slightly offset downwards
+            )
+            text_clips.append(shadow_txt)
+
+            # 2. Main TextClip (centered over shadow)
             txt = TextClip(
                 text=cap["text"],
                 font=font,
@@ -151,7 +170,7 @@ class SubtitleAgent:
                 stroke_color=stroke_color,
                 stroke_width=stroke_width,
                 method="caption",
-                size=(int(w * 0.85), None),   # wrap within 85% of width
+                size=(int(w * 0.85), None),
             )
             txt = (
                 txt
@@ -285,7 +304,8 @@ class SubtitleAgent:
         Falls back to a known Windows system font.
         """
         candidates = [
-            "C:/Windows/Fonts/arialbd.ttf",   # Arial Bold — clean for subtitles
+            "C:/Windows/Fonts/Impact.ttf",     # High CTR impact social media font
+            "C:/Windows/Fonts/arialbd.ttf",   # Arial Bold
             "C:/Windows/Fonts/arial.ttf",
             "C:/Windows/Fonts/calibri.ttf",
             "C:/Windows/Fonts/verdana.ttf",

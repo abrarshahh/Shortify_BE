@@ -6,7 +6,7 @@ from backend_main.config import SessionLocal, logger, STORAGE_ROOT
 from backend_main.models import Project, User, MediaAsset, ProjectMediaAsset
 from backend_main.auth import get_current_user
 from backend_main.schemas import ProjectCreate, ProjectResponse, ProjectDetailResponse, MediaResponse, ProjectListItem
-from backend_main.routers.render import render_jobs
+from backend_main import worker_service
 from typing import List
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
@@ -29,7 +29,7 @@ def list_all_projects(
 
     result = []
     for proj in projects:
-        job = render_jobs.get(str(proj.id), {})
+        job = worker_service.render_jobs.get(str(proj.id), {})
         result.append(
             ProjectListItem(
                 id=str(proj.id),
