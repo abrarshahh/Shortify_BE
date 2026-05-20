@@ -16,10 +16,31 @@ render_jobs: Dict[str, Dict[str, Any]] = {}
 _executor = ThreadPoolExecutor(max_workers=1)
 
 def update_job(project_id: str, updates: Dict[str, Any]):
-    """Helper to update job state fields in a thread-safe manner."""
+    """Helper to update job state fields in a thread-safe manner and persist to DB."""
     if project_id not in render_jobs:
         render_jobs[project_id] = {}
     render_jobs[project_id].update(updates)
+
+    db = SessionLocal()
+    try:
+        pid_uuid = uuid.UUID(project_id)
+        proj = db.query(Project).filter(Project.id == pid_uuid).first()
+        if proj:
+            status = updates.get("status")
+            if status == "running":
+                proj.is_rendering = True
+            elif status in ("done", "error"):
+                proj.is_rendering = False
+
+            if "progress_percentage" in updates:
+                proj.render_progress = updates["progress_percentage"]
+            if "current_step" in updates:
+                proj.render_step = updates["current_step"]
+            db.commit()
+    except Exception as e:
+        logger.warning(f"Failed to persist rendering progress to database: {e}")
+    finally:
+        db.close()
 
 def _execute_render_task(
     project_id: str,
@@ -45,10 +66,23 @@ def _execute_render_task(
 
     def orchestrator_progress_callback(percentage: int, step: str):
         logger.info(f"[{project_id}] Progress: {percentage}% | {step}")
+        messages_map = {
+            "Initializing pipeline...": "Launching Shortify AI engine orchestrator and loading resources.",
+            "Analyzing audio beats...": "RhythmEngineer is analyzing the soundtrack beats and energy levels to align transitions.",
+            "AI Media Analysis...": "MediaAnalyst is identifying visual highlights, scenes, and media quality.",
+            "Creating storyboard and timeline...": "CreativeDirector is compiling the narrative Edit Decision List story storyboard.",
+            "Rendering video...": "VideoEditor is center-cropping, syncing cuts to beats, and rendering video clips.",
+            "Color grading...": "ColorGradingAgent is applying rich cinematic look-up tables (LUTs) to balance color tones.",
+            "Checking safe zone compliance...": "ValidatorAgent is scanning overlays to ensure text remains perfectly within UI safe zones.",
+            "Transcribing speech...": "SubtitleAgent is transcribing spoken word audio with high-precision Whisper.",
+            "Burning subtitles...": "SubtitleAgent is drawing dual-layered drop-shadow captions onto the video canvas.",
+            "Creating click-through cover...": "ThumbnailAgent is rendering an eye-catching, high-impact thumbnail for social media."
+        }
+        friendly_message = messages_map.get(step, f"Processing stage: {step}")
         update_job(project_id, {
             "progress_percentage": percentage,
             "current_step": step,
-            "message": f"Step: {step}"
+            "message": friendly_message
         })
 
     try:
@@ -82,6 +116,16 @@ def _execute_render_task(
 
         final_video = final_state.get("final_video_path", "")
         verdict = final_state.get("safe_zone_report", {}).get("verdict", "N/A")
+
+        # Clean up intermediate render files to save disk space
+        for path_key in ["rendered_video_path", "color_graded_path"]:
+            p = final_state.get(path_key)
+            if p and os.path.exists(p) and p != final_video:
+                try:
+                    os.unlink(p)
+                    logger.info(f"[Worker] Cleaned up intermediate file: {p}")
+                except Exception as e:
+                    logger.warning(f"[Worker] Failed to delete intermediate file {p}: {e}")
 
         # Save result to DB
         db = SessionLocal()

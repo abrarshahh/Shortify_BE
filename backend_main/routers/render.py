@@ -2,6 +2,7 @@ import os
 import shutil
 import uuid
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional, List
@@ -104,6 +105,24 @@ def get_render_status(
 
     job = worker_service.render_jobs.get(str(project_id))
     if not job:
+        # Persisted DB state fallback if worker in-memory state is empty (e.g. server restarted)
+        if project.is_rendering:
+            return RenderResponse(
+                project_id=project_id,
+                status="running",
+                message=f"Restored render task: {project.render_step or 'Processing'}",
+                progress_percentage=project.render_progress or 0,
+                current_step=project.render_step or "Rendering..."
+            )
+        elif project.last_output_path:
+            return RenderResponse(
+                project_id=project_id,
+                status="done",
+                message="Render completed.",
+                progress_percentage=100,
+                current_step="Complete!",
+                final_video_path=str(STORAGE_ROOT / project.last_output_path)
+            )
         return RenderResponse(
             project_id=project_id,
             status="not_started",
@@ -135,3 +154,55 @@ def list_output_videos(
             output_video=proj.last_output_path
         ))
     return outputs
+
+@router.get("/{project_id}/download")
+def download_project_video(
+    project_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(lambda: SessionLocal())
+):
+    """
+    Downloads the final rendered video (.mp4) for the authenticated user.
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(404, "Project not found")
+    if project.user_id != user.id:
+        raise HTTPException(403, "Forbidden")
+    if not project.last_output_path:
+        raise HTTPException(400, "Project output video has not been rendered yet.")
+
+    video_path = STORAGE_ROOT / project.last_output_path
+    if not video_path.exists():
+        raise HTTPException(404, "Video file not found on disk.")
+
+    return FileResponse(
+        path=str(video_path),
+        media_type="video/mp4",
+        filename=os.path.basename(project.last_output_path)
+    )
+
+@router.get("/{project_id}/thumbnail")
+def get_project_thumbnail(
+    project_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(lambda: SessionLocal())
+):
+    """
+    Retrieves the generated cover thumbnail image (.jpg) for the project.
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(404, "Project not found")
+    if project.user_id != user.id:
+        raise HTTPException(403, "Forbidden")
+
+    thumbnail_path = STORAGE_ROOT / "exports" / str(project_id) / "thumbnail.jpg"
+    if not thumbnail_path.exists():
+        raise HTTPException(404, "Thumbnail image not found for this project.")
+
+    return FileResponse(
+        path=str(thumbnail_path),
+        media_type="image/jpeg",
+        filename="thumbnail.jpg"
+    )

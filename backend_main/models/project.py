@@ -23,6 +23,8 @@ class Project(Base):
     music_id = Column(PG_UUID(as_uuid=True), ForeignKey("media_assets.id"), nullable=True)  # FK to MediaAsset
     last_output_path = Column(String, nullable=True) # Path to the last generated video
     is_rendering = Column(Boolean, default=False)
+    render_progress = Column(Integer, default=0)
+    render_step = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     user = relationship("User", back_populates="projects")
     media_assets = relationship("MediaAsset", secondary="project_media_assets", back_populates="projects")

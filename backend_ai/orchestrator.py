@@ -180,9 +180,6 @@ class ShortifyOrchestrator:
         # we will append it to the project_title/prompt temporarily or we could just 
         # let the director generate a new one with a modified prompt.
         prompt = state["project_title"]
-        if feedback:
-            print("Applying Safety Feedback to EDL generation!")
-            prompt += f"\n\nCRITICAL FIX REQUIRED: {feedback}"
         
         print(f"Generating EDL. Prompt: {prompt}")
         edl = self.director_agent.generate_edl(
@@ -191,7 +188,8 @@ class ShortifyOrchestrator:
             audio_analysis=state.get("rhythm_data", {}),
             target_duration=state["target_duration"],
             aspect_ratio=state["aspect_ratio"],
-            style=state["style"]
+            style=state["style"],
+            feedback=feedback
         )
         
         return {"edl": edl, "edl_feedback": ""} # clear feedback after applying
@@ -216,7 +214,9 @@ class ShortifyOrchestrator:
         rendered_path = editor.render(
             edl=state["edl"],
             music_path=state.get("music_path"),
-            output_filename=output_filename
+            output_filename=output_filename,
+            aspect_ratio=state.get("aspect_ratio", "9:16"),
+            rhythm_data=state.get("rhythm_data", {})
         )
         
         return {"rendered_video_path": rendered_path}

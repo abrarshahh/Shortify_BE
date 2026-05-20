@@ -26,7 +26,8 @@ class CreativeDirector:
         media_analyses: List[Dict[str, Any]],
         target_duration: int = 30,
         aspect_ratio: str = "9:16",
-        style: str = "cinematic"
+        style: str = "cinematic",
+        feedback: str = None
     ) -> Dict[str, Any]:
         """
         Generates an Edit Decision List (EDL) by reasoning over audio beats and visual content.
@@ -122,21 +123,34 @@ class CreativeDirector:
           and 5.0 seconds for photos. Photos pair well with 'dip_to_black' or 'crossfade' transitions.
           Never assign 'speed-ramp' or 'cinematic-slow' pacing to photos since they have no video to ramp.
           Use 'jump-cut' as the pacing_style for all photos.
-        - Only use 'clip_name' from 'available_clips'.
+        - Only use 'clip_name' from 'available_clips' or its sub-segment virtual forms.
+        - SINGLE-SOURCE MULTI-CLIP MAPPING:
+          - If the user uploaded a single long video and you want to use multiple non-contiguous segments from it, you MUST reference specific virtual segments using the format: "filename:start_time:end_time".
+          - For example, if "vlog.mp4" has segments from 10.0 to 15.0 and from 25.0 to 30.0, you can specify two timeline items with "clip_name": "vlog.mp4:10.0:15.0" and "clip_name": "vlog.mp4:25.0:30.0" respectively.
+          - When using this notation:
+            - "start_in_clip" must be relative to the virtual segment boundaries (e.g. 0.0 is the beginning of the virtual segment).
+            - "end_in_clip" must be also relative to the virtual segment (e.g. 5.0).
         - Only return the JSON object.
         """
 
         user_message = f"User Intent: {user_prompt}\n\nContext Data: {json.dumps(context, indent=2)}"
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message}
+        ]
+        if feedback:
+            messages.append({
+                "role": "system",
+                "content": f"CRITICAL REVISION DIRECTIVE:\nYour previous EDL generation failed rendering safety checks. Please correct this issue in your new EDL output:\n{feedback}"
+            })
 
         import time
         for attempt in range(3):
             try:
                 response = self.client.chat.completions.create(
                     model=self.model_id,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_message}
-                    ],
+                    messages=messages,
                     response_format={"type": "json_object"}
                 )
                 break

@@ -44,6 +44,8 @@ class VideoEditor:
         self.DEFAULT_FADE_DURATION = editor_config.get("default_fade_duration", 0.3)
         self.ORIGINAL_AUDIO_VOLUME = editor_config.get("original_audio_volume", 0.3)
         self.MUSIC_VOLUME = editor_config.get("music_volume", 0.9)
+        self.target_w = 1080
+        self.target_h = 1920
 
     def _find_font(self) -> str:
         """Finds a suitable TTF font on the system for text overlays."""
@@ -116,8 +118,8 @@ class VideoEditor:
             A CompositeVideoClip representing the fully assembled video.
         """
         FADE_DUR = self.DEFAULT_FADE_DURATION
-        FRAME_W = 1080
-        FRAME_H = 1920
+        FRAME_W = self.target_w
+        FRAME_H = self.target_h
 
         layers = []
         cursor = 0.0  # absolute timeline position for the next clip's start
@@ -237,16 +239,12 @@ class VideoEditor:
         self,
         edl: Dict[str, Any],
         music_path: Optional[str] = None,
-        output_filename: str = "shortify_output.mp4"
+        output_filename: str = "shortify_output.mp4",
+        aspect_ratio: str = "9:16",
+        rhythm_data: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Renders the final video from an EDL produced by CreativeDirector.
-
-        The director's EDL specifies:
-          - clip_name, start_in_clip, end_in_clip  (what to take from source)
-          - timeline_start, timeline_end            (used for sort order only)
-          - transition                              (how to join to the previous clip)
-          - details.pacing_style                   (speed-ramp / jump-cut / cinematic-slow)
         """
         timeline = edl.get("timeline", [])
         if not timeline:
@@ -255,11 +253,23 @@ class VideoEditor:
         # Sort chronologically by director-specified timeline_start
         timeline.sort(key=lambda x: float(x.get("timeline_start", 0.0)))
 
+        # 0. Resolve aspect ratio target dimensions
+        dimensions_map = {
+            "9:16": (1080, 1920),
+            "16:9": (1920, 1080),
+            "1:1": (1080, 1080),
+        }
+        self.target_w, self.target_h = dimensions_map.get(aspect_ratio, (1080, 1920))
+
         title = edl.get("title", "Untitled")
-        print(f"Rendering '{title}' - {len(timeline)} director-specified segments...")
+        print(f"Rendering '{title}' (Aspect Ratio: {aspect_ratio}, Dimensions: {self.target_w}x{self.target_h}) - {len(timeline)} segments...")
 
         processed_clips = []
         transitions = []
+        
+        # Beat sync tracking
+        beat_times = rhythm_data.get("beat_times", []) if rhythm_data else []
+        accumulated_time = 0.0
 
         for i, item in enumerate(timeline):
             clip_name  = item.get("clip_name", "")
@@ -271,7 +281,32 @@ class VideoEditor:
             details    = item.get("details", {})
             pacing     = details.get("pacing_style", "jump-cut").lower()
 
-            clip_path = os.path.join(self.clips_dir, clip_name)
+            # Dynamic Beat-Sync Snapping
+            raw_duration = tl_end - tl_start
+            target_duration = raw_duration
+
+            if beat_times:
+                raw_tl_end = accumulated_time + raw_duration
+                nearest_beat = min(beat_times, key=lambda b: abs(b - raw_tl_end))
+                if abs(nearest_beat - raw_tl_end) <= 0.2:
+                    target_duration = max(0.1, nearest_beat - accumulated_time)
+                    print(f"Beat sync: snapping clip end from {raw_tl_end:.2f}s to beat {nearest_beat:.2f}s (duration adjusted: {raw_duration:.2f}s -> {target_duration:.2f}s)")
+
+            accumulated_time += target_duration
+
+            # Parse virtual segment notation (filename:start:end)
+            virtual_start = 0.0
+            virtual_end = None
+            source_filename = clip_name
+
+            if ":" in clip_name:
+                parts = clip_name.split(":")
+                if len(parts) == 3:
+                    source_filename = parts[0]
+                    virtual_start = float(parts[1])
+                    virtual_end = float(parts[2])
+
+            clip_path = os.path.join(self.clips_dir, source_filename)
             if not os.path.exists(clip_path):
                 print(f"  Warning: clip not found, skipping -> {clip_name}")
                 continue
@@ -281,9 +316,7 @@ class VideoEditor:
             is_image = ext in self.IMAGE_EXTENSIONS
 
             if is_image:
-                # Images have no duration of their own. Use the director's
-                # specified timeline duration as the display duration.
-                target_duration = round(tl_end - tl_start, 4)
+                # Images have no duration of their own. Use the calculated target_duration.
                 if target_duration <= 0:
                     target_duration = 3.0  # fallback: 3 seconds for photos
                     print(f"  Warning: no valid duration for image {clip_name}, defaulting to 3s.")
@@ -292,15 +325,25 @@ class VideoEditor:
                 safe_end = target_duration  # used in logging below
             else:
                 raw = VideoFileClip(clip_path)
-                safe_end = min(end_in, raw.duration)
-                if safe_end <= start_in:
-                    print(f"  Warning: invalid time range for {clip_name}, skipping.")
-                    raw.close()
-                    continue
-                clip = raw.subclipped(start_in, safe_end)
+                if virtual_end is not None:
+                    actual_start = virtual_start + start_in
+                    actual_end = min(virtual_start + end_in, virtual_end, raw.duration)
+                    safe_end = min(actual_end, raw.duration)
+                    if safe_end <= actual_start:
+                        print(f"  Warning: invalid time range for virtual segment {clip_name}, skipping.")
+                        raw.close()
+                        continue
+                    clip = raw.subclipped(actual_start, safe_end)
+                else:
+                    safe_end = min(end_in, raw.duration)
+                    if safe_end <= start_in:
+                        print(f"  Warning: invalid time range for {clip_name}, skipping.")
+                        raw.close()
+                        continue
+                    clip = raw.subclipped(start_in, safe_end)
 
-            # 2. Resize and Center-Crop to 9:16 (1080x1920)
-            target_w, target_h = 1080, 1920
+            # 2. Resize and Center-Crop to dynamic aspect ratio
+            target_w, target_h = self.target_w, self.target_h
             clip_w, clip_h = clip.size
             
             # Calculate scaling to fill target
@@ -324,7 +367,6 @@ class VideoEditor:
             # 4. Match director-specified duration
             # For videos: trim if over. For images: duration already set at load time.
             if not is_image:
-                target_duration = round(tl_end - tl_start, 4)
                 if target_duration > 0 and clip.duration > target_duration:
                     clip = clip.subclipped(0, target_duration)
 
@@ -335,9 +377,9 @@ class VideoEditor:
                 kb_direction = "in" if i % 2 == 0 else "out"
                 clip = self._apply_ken_burns(clip, direction=kb_direction)
 
-            # 5. Duck original clip audio
-            if clip.audio is not None:
-                # Only duck if there is actually audio in the clip
+            # 5. Duck original clip audio (only if background music is active)
+            if clip.audio is not None and music_path and os.path.exists(music_path):
+                # Only duck if there is actually audio in the clip and music is present
                 clip = clip.with_audio(
                     clip.audio.with_effects([MultiplyVolume(self.ORIGINAL_AUDIO_VOLUME)])
                 )
