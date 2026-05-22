@@ -96,7 +96,10 @@ def get_project_details(
                 mime_type=asset.mime_type,
                 file_size=asset.file_size,
                 duration=asset.duration,
+                width=asset.width,
+                height=asset.height,
                 thumbnail_path=asset.thumbnail_path,
+                extra_metadata=asset.extra_metadata,
                 uploaded_at=asset.uploaded_at
             ))
             

@@ -6,9 +6,30 @@ from backend_main.config import SessionLocal, logger, STORAGE_ROOT
 from backend_main.models import Project, MediaAsset, User, ProjectMediaAsset
 from backend_main.auth import get_current_user
 from backend_main.schemas import MediaResponse, UploadResponse, MediaLinkRequest
-from backend_main.utils import save_upload_file, validate_file
+from backend_main.utils import save_upload_file, validate_file, extract_media_metadata
 
 router = APIRouter(prefix="/media", tags=["Media"])
+
+
+def _media_asset_fields(full_path) -> dict:
+    metadata = extract_media_metadata(str(full_path))
+    duration = metadata.get("duration_seconds")
+    return {
+        "file_size": full_path.stat().st_size,
+        "duration": int(round(duration)) if duration is not None else None,
+        "width": metadata.get("resolution", {}).get("width"),
+        "height": metadata.get("resolution", {}).get("height"),
+        "extra_metadata": {
+            "codec": metadata.get("codec"),
+            "audio_codec": metadata.get("audio_codec"),
+            "bitrate_bps": metadata.get("bitrate_bps"),
+            "camera_info": metadata.get("camera_info"),
+            "gps": metadata.get("gps"),
+            "fps": metadata.get("fps"),
+            "aspect_ratio": metadata.get("aspect_ratio"),
+            "media_type": metadata.get("media_type"),
+        },
+    }
 
 @router.post("/upload", response_model=UploadResponse, status_code=201)
 def upload_media_to_library(
@@ -25,14 +46,14 @@ def upload_media_to_library(
             
         rel_path = save_upload_file(str(user.id), upload)
         full_path = STORAGE_ROOT / rel_path
-        file_size = full_path.stat().st_size
+        asset_fields = _media_asset_fields(full_path)
         
         asset = MediaAsset(
             user_id=user.id,
             original_filename=upload.filename,
             storage_path=rel_path,
             mime_type=upload.content_type,
-            file_size=file_size
+            **asset_fields
         )
         db.add(asset)
         db.commit()
@@ -59,14 +80,14 @@ def upload_media_to_project(
             continue
         rel_path = save_upload_file(str(user.id), upload)
         full_path = STORAGE_ROOT / rel_path
-        file_size = full_path.stat().st_size
+        asset_fields = _media_asset_fields(full_path)
         
         asset = MediaAsset(
             user_id=user.id,
             original_filename=upload.filename,
             storage_path=rel_path,
             mime_type=upload.content_type,
-            file_size=file_size
+            **asset_fields
         )
         db.add(asset)
         db.commit()
@@ -123,7 +144,10 @@ def list_media(
             mime_type=m.mime_type,
             file_size=m.file_size,
             duration=m.duration,
+            width=m.width,
+            height=m.height,
             thumbnail_path=m.thumbnail_path,
+            extra_metadata=m.extra_metadata,
             uploaded_at=m.uploaded_at,
             project_ids=[str(p.id) for p in m.projects]
         ) for m in media

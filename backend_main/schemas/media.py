@@ -1,5 +1,5 @@
 import uuid
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel
 
@@ -10,7 +10,10 @@ class MediaResponse(BaseModel):
     mime_type: str
     file_size: int
     duration: Optional[int] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
     thumbnail_path: Optional[str] = None
+    extra_metadata: Optional[Dict[str, Any]] = None
     uploaded_at: datetime
     project_ids: List[uuid.UUID] = []
 

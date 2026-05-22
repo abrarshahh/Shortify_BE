@@ -190,7 +190,10 @@ def list_audio(
             mime_type=a.mime_type,
             file_size=a.file_size,
             duration=a.duration,
+            width=a.width,
+            height=a.height,
             thumbnail_path=a.thumbnail_path,
+            extra_metadata=a.extra_metadata,
             uploaded_at=a.uploaded_at,
             project_ids=p_ids
         ))

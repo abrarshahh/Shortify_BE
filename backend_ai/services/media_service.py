@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from moviepy import VideoFileClip
 from backend_ai.core.config_loader import AGENTS_CONFIG
 from backend_ai.core.api_utils import rate_limit_guard
+from backend_main.media_metadata import extract_media_metadata
 
 load_dotenv()
 
@@ -37,49 +38,10 @@ class MediaAnalyst:
         cache_key = hashlib.md5(fingerprint.encode()).hexdigest()
         return os.path.join(self.cache_dir, f"{cache_key}.json")
 
-    # Image extensions that cannot be opened by VideoFileClip
-    _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif"}
-
     def _get_file_metadata(self, file_path: str) -> Dict[str, Any]:
-        """
-        Extracts technical metadata from the file locally.
-        Routes image files to PIL and video files to MoviePy.
-        """
-        ext = os.path.splitext(file_path)[1].lower()
-        is_image = ext in self._IMAGE_EXTENSIONS
-
+        """Extracts technical metadata from the file locally."""
         try:
-            if is_image:
-                from PIL import Image as PILImage
-                with PILImage.open(file_path) as img:
-                    width, height = img.size
-                return {
-                    "filename": os.path.basename(file_path),
-                    "file_size_mb": round(os.path.getsize(file_path) / (1024 * 1024), 2),
-                    "duration_seconds": None,  # photos have no duration
-                    "resolution": {"width": width, "height": height},
-                    "aspect_ratio": round(width / height, 2),
-                    "fps": None,
-                    "has_audio": False,
-                    "extension": ext,
-                    "media_type": "photo"
-                }
-            else:
-                with VideoFileClip(file_path) as clip:
-                    return {
-                        "filename": os.path.basename(file_path),
-                        "file_size_mb": round(os.path.getsize(file_path) / (1024 * 1024), 2),
-                        "duration_seconds": round(clip.duration, 2),
-                        "resolution": {
-                            "width": clip.size[0],
-                            "height": clip.size[1]
-                        },
-                        "aspect_ratio": round(clip.size[0] / clip.size[1], 2),
-                        "fps": round(clip.fps, 2),
-                        "has_audio": clip.audio is not None,
-                        "extension": ext,
-                        "media_type": "video"
-                    }
+            return extract_media_metadata(file_path)
         except Exception as e:
             print(f"Error extracting file metadata: {e}")
             return {"error": f"Could not extract technical metadata: {str(e)}"}
@@ -103,8 +65,8 @@ class MediaAnalyst:
             except Exception as e:
                 print(f"Error reading cache: {e}")
 
-        ext = os.path.splitext(file_path)[1].lower()
-        is_image = ext in self._IMAGE_EXTENSIONS
+        file_metadata = self._get_file_metadata(file_path)
+        is_image = file_metadata.get("media_type") == "photo"
         print(f"Uploading {'image' if is_image else 'video'} to Gemini: {file_path}")
         
         # Upload using the new SDK (file is the correct argument)
@@ -270,8 +232,6 @@ class MediaAnalyst:
             analysis = json.loads(text)
             
             # Extract technical metadata locally
-            file_metadata = self._get_file_metadata(file_path)
-            
             # Combine results
             final_result = {
                 "file_metadata": file_metadata,
