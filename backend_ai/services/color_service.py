@@ -1,8 +1,11 @@
 import os
+import logging
 import subprocess
 from typing import Dict, Any, Optional
 
 from backend_ai.core.config import COLOR_GRADING_ENABLED, FFMPEG_PATH
+
+logger = logging.getLogger("agents.color_grading")
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +197,7 @@ class ColorGradingAgent:
             RuntimeError:      If FFmpeg exits with a non-zero return code.
         """
         if not self.enabled:
-            print("ColorGradingAgent: grading disabled in config, skipping.")
+            logger.info("ColorGradingAgent: grading disabled in config, skipping")
             return video_path
 
         if not os.path.exists(video_path):
@@ -215,7 +218,7 @@ class ColorGradingAgent:
             # Escape path for FFmpeg filter on Windows
             lut_path_escaped = lut_path.replace("\\", "/").replace(":", "\\:")
             filter_chain = f"lut3d={lut_path_escaped}"
-            print(f"ColorGradingAgent: detected custom LUT file -> {lut_path}")
+            logger.info(f"Detected custom LUT file -> {lut_path}")
         else:
             preset = self._get_preset(style)
             filter_chain = self._build_filter_chain(preset)
@@ -226,10 +229,10 @@ class ColorGradingAgent:
         output_filename = f"{base_name}{output_suffix}{ext}"
         output_path = os.path.join(output_dir, output_filename)
 
-        print(f"ColorGradingAgent: applying '{style}' grade...")
-        print(f"  Input:   {video_path}")
-        print(f"  Output:  {output_path}")
-        print(f"  Filters: {filter_chain}")
+        logger.info(f"Applying '{style}' color grade")
+        logger.info(f"  Input:   {video_path}")
+        logger.info(f"  Output:  {output_path}")
+        logger.info(f"  Filters: {filter_chain}")
 
         cmd = [
             self.ffmpeg_path,
@@ -263,7 +266,7 @@ class ColorGradingAgent:
                 f"stderr:\n{result.stderr[-2000:]}"  # last 2000 chars to avoid huge logs
             )
 
-        print(f"ColorGradingAgent: grading complete -> {output_path}")
+        logger.info(f"Color grading complete -> {output_path}")
         return output_path
 
     def get_preset_info(self, style: str) -> Dict[str, Any]:
@@ -285,5 +288,4 @@ if __name__ == "__main__":
     agent = ColorGradingAgent()
     for style_name in STYLE_PRESETS:
         info = agent.get_preset_info(style_name)
-        print(f"\n[{info['style']}]")
-        print(f"  Filter: {info['filter_chain']}")
+        logger.info(f"[{info['style']}] Filter: {info['filter_chain']}")

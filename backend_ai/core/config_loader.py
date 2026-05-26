@@ -1,6 +1,9 @@
 import os
+import logging
 import yaml
 from typing import Dict, Any
+
+logger = logging.getLogger(__name__)
 
 def load_agents_config() -> Dict[str, Any]:
     """
@@ -15,7 +18,7 @@ def load_agents_config() -> Dict[str, Any]:
         with open(config_path, "r") as f:
             return yaml.safe_load(f)
     except Exception as e:
-        print(f"Error loading agents_config.yaml: {e}")
+        logger.error(f"Error loading agents_config.yaml: {e}")
         return {}
 
 # Global config instance

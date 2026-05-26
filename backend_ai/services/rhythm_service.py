@@ -2,7 +2,10 @@ import librosa
 import numpy as np
 import json
 import os
+import logging
 from typing import List, Dict, Any
+
+logger = logging.getLogger("agents.rhythm")
 
 class RhythmEngineer:
     def __init__(self):
@@ -15,7 +18,8 @@ class RhythmEngineer:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Audio file not found: {file_path}")
 
-        print(f"Analyzing music: {file_path}")
+        file_size = os.path.getsize(file_path)
+        logger.info(f"RhythmEngineer: Starting music analysis. Input path: {file_path} (Size: {file_size} bytes)")
         
         # Load audio file
         y, sr = librosa.load(file_path)
@@ -62,6 +66,11 @@ class RhythmEngineer:
             "segment_sentiments": self._get_segment_sentiments(y, sr, float(tempo))
         }
 
+        logger.info(
+            f"RhythmEngineer: Music analysis completed. Duration: {result['duration']:.2f}s, "
+            f"Tempo: {result['tempo']:.1f} BPM, Beats: {result['beat_count']}, "
+            f"Energy segments: {len(result['energy_segments'])}, Mood: {result['sentiment']['label']}"
+        )
         return result
 
     def _group_timestamps(self, timestamps: List[float], threshold: float = 2.0) -> List[Dict[str, float]]:
@@ -116,6 +125,12 @@ class RhythmEngineer:
         # Score is the primary sentiment strength (0 to 1)
         score = valence if valence > 0.5 else (1 - valence)
 
+        logger.debug(
+            f"RhythmEngineer (Heuristics): Computed average RMS: {avg_rms:.4f}, "
+            f"average centroid: {avg_centroid:.1f}, calculated valence: {valence:.3f}, "
+            f"arousal: {arousal:.3f} -> Mapped mood: {label}"
+        )
+
         return {
             "label": label,
             "score": round(float(score), 3),
@@ -152,4 +167,5 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         engineer = RhythmEngineer()
         analysis = engineer.analyze_music(sys.argv[1])
-        print(json.dumps(analysis, indent=2))
+        logger.info(json.dumps(analysis, indent=2))
+

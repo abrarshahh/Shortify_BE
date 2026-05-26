@@ -1,10 +1,13 @@
 import os
+import logging
 import numpy as np
 from PIL import Image
 from typing import Dict, Any, List, Tuple
 from moviepy.video.io.VideoFileClip import VideoFileClip
 
 from backend_ai.core.config_loader import AGENTS_CONFIG
+
+logger = logging.getLogger("agents.project_analyst")
 
 class ProjectAnalystAgent:
     """
@@ -27,7 +30,7 @@ class ProjectAnalystAgent:
         Main entry point for pre-flight check.
         Validates, grades, and reorders input files.
         """
-        print(f"ProjectAnalystAgent: Starting analysis for {len(video_paths)} input files...")
+        logger.info(f"Starting pre-flight analysis for {len(video_paths)} input files")
         
         valid_media: List[Dict[str, Any]] = []
         rejected_files: List[Dict[str, Any]] = []
@@ -35,13 +38,13 @@ class ProjectAnalystAgent:
         for path in video_paths:
             # 1. Validation Checks
             if not os.path.exists(path):
-                print(f"  Warning: File does not exist on disk: {path}")
+                logger.warning(f"File does not exist on disk: {path}")
                 rejected_files.append({"path": path, "reason": "file_not_found"})
                 continue
                 
             file_size = os.path.getsize(path)
             if file_size == 0:
-                print(f"  Warning: File is empty (0 bytes): {path}")
+                logger.warning(f"File is empty (0 bytes): {path}")
                 rejected_files.append({"path": path, "reason": "empty_file"})
                 continue
                 
@@ -53,7 +56,7 @@ class ProjectAnalystAgent:
             elif ext in self.SUPPORTED_PHOTO_EXTS:
                 media_type = "photo"
             else:
-                print(f"  Warning: Unsupported file extension '{ext}': {path}")
+                logger.warning(f"Unsupported file extension '{ext}': {path}")
                 rejected_files.append({"path": path, "reason": "unsupported_extension"})
                 continue
 
@@ -65,7 +68,7 @@ class ProjectAnalystAgent:
                         duration = clip.duration
                     
                     if duration < self.min_video_duration:
-                        print(f"  Warning: Video clip is too short ({duration:.2f}s): {path}")
+                        logger.warning(f"Video clip too short ({duration:.2f}s, min={self.min_video_duration}s): {path}")
                         rejected_files.append({
                             "path": path,
                             "reason": "file_too_short",
@@ -73,7 +76,7 @@ class ProjectAnalystAgent:
                         })
                         continue
                 except Exception as e:
-                    print(f"  Warning: MoviePy could not read video duration for {path}. Error: {e}")
+                    logger.warning(f"MoviePy could not read video duration for {path}: {e}")
                     rejected_files.append({"path": path, "reason": "unreadable_video"})
                     continue
 
@@ -88,7 +91,7 @@ class ProjectAnalystAgent:
                 else:
                     quality_score, avg_sharpness, avg_brightness = self._score_photo(path)
             except Exception as e:
-                print(f"  Warning: Local quality scoring failed for {path}, assigning fallback 0.5. Error: {e}")
+                logger.warning(f"Quality scoring failed for {path}, assigning fallback 0.5: {e}")
                 quality_score = 0.5
 
             valid_media.append({
@@ -115,9 +118,9 @@ class ProjectAnalystAgent:
             "recommended_order": recommended_order
         }
         
-        print(f"ProjectAnalystAgent: Analysis complete. Valid: {len(valid_media)}/{len(video_paths)}.")
+        logger.info(f"Analysis complete. Valid: {len(valid_media)}/{len(video_paths)} | Rejected: {len(rejected_files)}")
         if recommended_hook:
-            print(f"  Recommended Hook: {recommended_hook} (Score: {valid_media[0]['quality_score']})")
+            logger.info(f"Recommended hook: {recommended_hook} (score={valid_media[0]['quality_score']:.4f})")
             
         return report
 
@@ -212,4 +215,4 @@ class ProjectAnalystAgent:
 if __name__ == "__main__":
     # Smoke test
     agent = ProjectAnalystAgent()
-    print("ProjectAnalystAgent initialized successfully.")
+    logger.info("ProjectAnalystAgent initialized successfully.")

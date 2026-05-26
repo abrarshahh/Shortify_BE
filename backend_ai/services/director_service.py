@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 from typing import List, Dict, Any
 from groq import Groq
 from dotenv import load_dotenv
@@ -7,6 +8,7 @@ from backend_ai.core.config_loader import AGENTS_CONFIG
 from backend_ai.core.api_utils import rate_limit_guard
 
 load_dotenv()
+logger = logging.getLogger("agents.director")
 
 class CreativeDirector:
     def __init__(self):
@@ -32,6 +34,10 @@ class CreativeDirector:
         """
         Generates an Edit Decision List (EDL) by reasoning over audio beats and visual content.
         """
+        logger.info(f"CreativeDirector: Starting EDL generation. Prompt: '{user_prompt}'")
+        logger.debug(f"CreativeDirector: Aspect Ratio: {aspect_ratio}, Style: {style}, Target Duration: {target_duration}s")
+        if feedback:
+            logger.warning(f"CreativeDirector: Re-generating EDL due to validation failure. Feedback: {feedback}")
         
         # Prepare the context for the LLM
         context = {
@@ -145,6 +151,10 @@ class CreativeDirector:
                 "content": f"CRITICAL REVISION DIRECTIVE:\nYour previous EDL generation failed rendering safety checks. Please correct this issue in your new EDL output:\n{feedback}"
             })
 
+        logger.info(f"CreativeDirector: Calling Groq model: {self.model_id}")
+        logger.debug(f"CreativeDirector (System Prompt):\n{system_prompt}")
+        logger.debug(f"CreativeDirector (User Message):\n{user_message}")
+
         import time
         for attempt in range(3):
             try:
@@ -155,16 +165,27 @@ class CreativeDirector:
                 )
                 break
             except Exception as e:
+                logger.warning(f"CreativeDirector: Groq API call failed (attempt {attempt + 1}/3): {e}")
                 if attempt < 2:
                     time.sleep(2)
                     continue
                 raise e
 
         try:
-            edl = json.loads(response.choices[0].message.content)
+            raw_content = response.choices[0].message.content
+            logger.debug(f"CreativeDirector (Raw Output):\n{raw_content}")
+            edl = json.loads(raw_content)
+            
+            logger.info(
+                f"CreativeDirector: EDL successfully generated! "
+                f"Title: '{edl.get('title')}', "
+                f"Storyline: '{edl.get('storyline')}', "
+                f"Total Duration: {edl.get('total_duration')}s, "
+                f"Timeline Clips: {len(edl.get('timeline', []))}"
+            )
             return edl
         except Exception as e:
-            print(f"Error parsing Groq response: {e}")
+            logger.error(f"CreativeDirector: Error parsing response from Groq: {e}")
             return {
                 "error": "Failed to generate structured EDL",
                 "raw_response": response.choices[0].message.content
@@ -173,4 +194,5 @@ class CreativeDirector:
 if __name__ == "__main__":
     # Small test case if run directly
     director = CreativeDirector()
-    print("Director initialized.")
+    logger.info("Director initialized.")
+

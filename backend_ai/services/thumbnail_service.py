@@ -1,8 +1,11 @@
 import os
+import logging
 import numpy as np
 from PIL import Image, ImageEnhance, ImageDraw, ImageFont
 from moviepy.video.io.VideoFileClip import VideoFileClip
 from typing import Optional
+
+logger = logging.getLogger("agents.thumbnail")
 
 class ThumbnailAgent:
     """
@@ -24,7 +27,7 @@ class ThumbnailAgent:
         """
         Generates a stylized thumbnail.jpg from the video clip.
         """
-        print(f"ThumbnailAgent: generating cover thumbnail from {video_path}...")
+        logger.info(f"Generating thumbnail from: {video_path}")
         
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Video file not found: {video_path}")
@@ -40,7 +43,7 @@ class ThumbnailAgent:
                 frame = clip.get_frame(sample_t)
                 img = Image.fromarray(frame)
         except Exception as e:
-            print(f"  Warning: MoviePy frame extraction failed: {e}. Creating fallback gray thumbnail.")
+            logger.warning(f"MoviePy frame extraction failed: {e}. Creating fallback gray thumbnail")
             img = Image.new("RGB", (1280, 720), color=(80, 80, 80))
 
         # 2. Apply high-contrast and saturation enhancements
@@ -60,17 +63,17 @@ class ThumbnailAgent:
             # Apply subtle vignette effect
             img = self._apply_vignette(img)
         except Exception as e:
-            print(f"  Warning: Color adjustments failed: {e}")
+            logger.warning(f"Color adjustments failed: {e}")
 
         # 3. Text Overlay with legibility protections (drop shadow + black border)
         if overlay_text:
             try:
                 self._draw_overlay_text(img, overlay_text)
             except Exception as e:
-                print(f"  Warning: Subtitle text overlay failed: {e}")
+                logger.warning(f"Text overlay failed: {e}")
 
         img.save(output_path, "JPEG", quality=95)
-        print(f"ThumbnailAgent: thumbnail successfully generated at {output_path}")
+        logger.info(f"Thumbnail generated -> {output_path}")
         return output_path
 
     def _apply_vignette(self, img: Image.Image) -> Image.Image:
@@ -151,4 +154,4 @@ class ThumbnailAgent:
 
 if __name__ == "__main__":
     agent = ThumbnailAgent()
-    print("ThumbnailAgent initialized successfully.")
+    logger.info("ThumbnailAgent initialized successfully.")

@@ -1,4 +1,5 @@
 import os
+import logging
 from typing import Dict, Any, List, Optional, Callable
 from typing_extensions import TypedDict
 
@@ -16,6 +17,11 @@ from backend_ai.services.thumbnail_service import ThumbnailAgent
 from backend_ai.services.edl_validation_service import validate_edl
 from backend_ai.schemas.edl import EDLGenerationError, EDLValidationError
 from backend_ai.core.config_loader import AGENTS_CONFIG
+from backend_ai.core.logging_config import setup_logging, start_new_agent_run
+
+# Initialize logging config
+setup_logging()
+logger = logging.getLogger("orchestrator")
 
 # -------------------------------------------------------------------
 # 1. Define the State
@@ -115,7 +121,7 @@ class ShortifyOrchestrator:
     # -------------------------------------------------------------------
 
     def node_pre_flight_check(self, state: AgentState) -> Dict:
-        print("\n--- NODE: pre_flight_check ---")
+        logger.info("NODE: pre_flight_check")
         callback = state.get("progress_callback")
         if callback:
             callback(10, "Evaluating video clip quality...")
@@ -135,7 +141,7 @@ class ShortifyOrchestrator:
         }
 
     def node_analyze_rhythm(self, state: AgentState) -> Dict:
-        print("\n--- NODE: analyze_rhythm ---")
+        logger.info("NODE: analyze_rhythm")
         callback = state.get("progress_callback")
         if callback:
             callback(25, "Analyzing audio beats...")
@@ -143,15 +149,15 @@ class ShortifyOrchestrator:
         music_path = state.get("music_path")
         
         if not music_path or not os.path.exists(music_path):
-            print("No music path provided or found. Skipping rhythm analysis.")
+            logger.info("No music path provided or found. Skipping rhythm analysis.")
             return {"rhythm_data": {}}
         
-        print(f"Analyzing beats for: {music_path}")
+        logger.info(f"Analyzing beats for: {music_path}")
         rhythm_data = self.rhythm_agent.analyze_music(music_path)
         return {"rhythm_data": rhythm_data}
 
     def node_analyze_media(self, state: AgentState) -> Dict:
-        print("\n--- NODE: analyze_media ---")
+        logger.info("NODE: analyze_media")
         callback = state.get("progress_callback")
         if callback:
             callback(50, "AI Media Analysis...")
@@ -159,19 +165,19 @@ class ShortifyOrchestrator:
         visual_data = []
         for path in state["video_paths"]:
             if os.path.exists(path):
-                print(f"Analyzing visual context for: {path}")
+                logger.info(f"Analyzing visual context for: {path}")
                 analysis = self.media_agent.analyze_video(path)
                 visual_data.append(analysis)
                 # Small delay to avoid bursting the Gemini API rate limit
                 import time
                 time.sleep(1.5)
             else:
-                print(f"Warning: Video not found at {path}")
+                logger.warning(f"Video not found at {path}")
                 
         return {"visual_data": visual_data}
 
     def node_generate_edl(self, state: AgentState) -> Dict:
-        print("\n--- NODE: generate_edl ---")
+        logger.info("NODE: generate_edl")
         callback = state.get("progress_callback")
         if callback:
             callback(65, "Creating storyboard and timeline...")
@@ -185,7 +191,7 @@ class ShortifyOrchestrator:
         prompt = state["project_title"]
 
         while True:
-            print(f"Generating EDL. Prompt: {prompt}")
+            logger.info(f"Generating EDL. Prompt: {prompt}")
             edl = self.director_agent.generate_edl(
                 user_prompt=prompt,
                 media_analyses=state["visual_data"],
@@ -209,7 +215,7 @@ class ShortifyOrchestrator:
                 feedback = exc.to_feedback()
                 state["edl_feedback"] = feedback
 
-                print(f"EDL validation failed (attempt {max_edl_retries}/3): {feedback}")
+                logger.warning(f"EDL validation failed (attempt {max_edl_retries}/3): {feedback}")
                 if max_edl_retries >= 3:
                     raise EDLGenerationError(
                         retry_count=max_edl_retries,
@@ -220,7 +226,7 @@ class ShortifyOrchestrator:
                 continue
 
     def node_render_video(self, state: AgentState) -> Dict:
-        print("\n--- NODE: render_video ---")
+        logger.info("NODE: render_video")
         callback = state.get("progress_callback")
         if callback:
             callback(80, "Rendering video...")
@@ -235,7 +241,7 @@ class ShortifyOrchestrator:
         
         output_filename = f"render_{state['output_filename']}"
         
-        print(f"Rendering EDL to {output_filename}...")
+        logger.info(f"Rendering EDL to {output_filename}...")
         rendered_path = editor.render(
             edl=state["edl"],
             music_path=state.get("music_path"),
@@ -247,7 +253,7 @@ class ShortifyOrchestrator:
         return {"rendered_video_path": rendered_path}
 
     def node_color_grade(self, state: AgentState) -> Dict:
-        print("\n--- NODE: color_grade ---")
+        logger.info("NODE: color_grade")
         callback = state.get("progress_callback")
         if callback:
             callback(90, "Applying style color grade...")
@@ -262,11 +268,11 @@ class ShortifyOrchestrator:
         except Exception as e:
             # Color grading is non-critical — if it fails, continue with
             # the ungraded video rather than aborting the whole pipeline.
-            print(f"  Warning: Color grading failed, using ungraded video. Error: {e}")
+            logger.warning(f"Color grading failed, using ungraded video. Error: {e}")
             return {"color_graded_path": state["rendered_video_path"]}
 
     def node_review_safety(self, state: AgentState) -> Dict:
-        print("\n--- NODE: review_safety ---")
+        logger.info("NODE: review_safety")
         callback = state.get("progress_callback")
         if callback:
             callback(95, "Checking caption safety zones...")
@@ -274,7 +280,7 @@ class ShortifyOrchestrator:
         edl = state["edl"]
         
         report = self.subtitle_agent.check_safe_zones(edl)
-        print(f"Safety Verdict: {report['verdict']}")
+        logger.info(f"Safety Verdict: {report['verdict']}")
         
         return {"safe_zone_report": report}
 
@@ -296,16 +302,16 @@ class ShortifyOrchestrator:
                 "Specific violations: " + " | ".join(flags)
             )
             state["retry_count"] = retry_count + 1
-            print(f"Routing back to generate_edl due to Safety WARNING! (Retry {state['retry_count']}/5)")
+            logger.warning(f"Routing back to generate_edl due to Safety WARNING! (Retry {state['retry_count']}/5)")
             return "fail"
             
         if retry_count >= 5 and (verdict == "WARN" or verdict == "FAIL"):
-            print("Maximum safety check retries (5) reached. Proceeding with the current video despite safe-zone warnings.")
+            logger.warning("Maximum safety check retries (5) reached. Proceeding with the current video despite safe-zone warnings.")
             
         return "pass"
 
     def node_burn_subtitles(self, state: AgentState) -> Dict:
-        print("\n--- NODE: burn_subtitles ---")
+        logger.info("NODE: burn_subtitles")
         callback = state.get("progress_callback")
         if callback:
             callback(98, "Burning dynamic subtitles...")
@@ -317,7 +323,7 @@ class ShortifyOrchestrator:
         final_output = os.path.join(self.exports_dir, state["output_filename"])
         
         if not requires_subtitles:
-            print("Subtitles not explicitly requested. Skipping transcription and burning.")
+            logger.info("Subtitles not explicitly requested. Skipping transcription and burning.")
             import shutil
             shutil.copy(video_path, final_output)
         # Generate cover thumbnail for opt-out subtitles
@@ -332,25 +338,25 @@ class ShortifyOrchestrator:
                 overlay_text=overlay_text
             )
         except Exception as e:
-            print(f"  Warning: Cover thumbnail generation failed: {e}")
+            logger.warning(f"Cover thumbnail generation failed: {e}")
 
         return {
             "transcription": {},
             "final_video_path": final_output
         }
 
-        print(f"Transcribing audio for {video_path}...")
+        logger.info(f"Transcribing audio for {video_path}...")
         transcription = self.subtitle_agent.transcribe(video_path)
         
         if transcription["captions"]:
-            print(f"Burning subtitles to {final_output}...")
+            logger.info(f"Burning subtitles to {final_output}...")
             final_video_path = self.subtitle_agent.burn_subtitles(
                 video_path=video_path,
                 captions=transcription["captions"],
                 output_path=final_output
             )
         else:
-            print("No spoken words detected. Subtitle burning skipped.")
+            logger.info("No spoken words detected. Subtitle burning skipped.")
             # Still copy or rename to final output
             import shutil
             shutil.copy(video_path, final_output)
@@ -370,7 +376,7 @@ class ShortifyOrchestrator:
                 overlay_text=overlay_text
             )
         except Exception as e:
-            print(f"  Warning: Cover thumbnail generation failed: {e}")
+            logger.warning(f"Cover thumbnail generation failed: {e}")
 
         return {
             "transcription": transcription,
@@ -383,12 +389,19 @@ class ShortifyOrchestrator:
 
     def run(self, initial_state: AgentState):
         """Executes the LangGraph workflow."""
-        print(f"Starting Shortify Pipeline for: '{initial_state['project_title']}'")
+        # Retrieve or generate run_id
+        run_id = os.path.basename(self.exports_dir)
+        if not run_id or run_id == "exports":
+            import uuid
+            run_id = f"run_{uuid.uuid4().hex[:8]}"
+
+        start_new_agent_run(run_id, initial_state.get("project_title", "Untitled"))
+        logger.info(f"Starting Shortify Pipeline for project: '{initial_state['project_title']}'")
         
         # Invoke the graph
         final_state = self.app.invoke(initial_state)
         
-        print("\n=== SHORTIFY PIPELINE COMPLETE ===")
-        print(f"Final Video: {final_state.get('final_video_path')}")
+        logger.info("=== SHORTIFY PIPELINE COMPLETE ===")
+        logger.info(f"Final Video: {final_state.get('final_video_path')}")
         return final_state
 

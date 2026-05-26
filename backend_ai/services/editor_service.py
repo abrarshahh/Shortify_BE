@@ -1,5 +1,6 @@
 import os
 import numpy as np
+import logging
 from typing import Dict, Any, Optional
 
 from moviepy import (
@@ -21,6 +22,8 @@ from backend_ai.core.config import (
     VIDEO_EDITOR_PACING_SPEEDS,
 )
 from backend_ai.services.edl_validation_service import validate_edl
+
+logger = logging.getLogger("agents.editor")
 
 
 class VideoEditor:
@@ -265,7 +268,7 @@ class VideoEditor:
         self.target_w, self.target_h = dimensions_map.get(aspect_ratio, (1080, 1920))
 
         title = edl.get("title", "Untitled")
-        print(f"Rendering '{title}' (Aspect Ratio: {aspect_ratio}, Dimensions: {self.target_w}x{self.target_h}) - {len(timeline)} segments...")
+        logger.info(f"Rendering '{title}' | aspect={aspect_ratio} | dims={self.target_w}x{self.target_h} | segments={len(timeline)}")
 
         processed_clips = []
         transitions = []
@@ -293,7 +296,7 @@ class VideoEditor:
                 nearest_beat = min(beat_times, key=lambda b: abs(b - raw_tl_end))
                 if abs(nearest_beat - raw_tl_end) <= 0.2:
                     target_duration = max(0.1, nearest_beat - accumulated_time)
-                    print(f"Beat sync: snapping clip end from {raw_tl_end:.2f}s to beat {nearest_beat:.2f}s (duration adjusted: {raw_duration:.2f}s -> {target_duration:.2f}s)")
+                    logger.info(f"Beat sync: snapping clip end {raw_tl_end:.2f}s -> beat {nearest_beat:.2f}s (dur {raw_duration:.2f}s -> {target_duration:.2f}s)")
 
             accumulated_time += target_duration
 
@@ -311,7 +314,7 @@ class VideoEditor:
 
             clip_path = os.path.join(self.clips_dir, source_filename)
             if not os.path.exists(clip_path):
-                print(f"  Warning: clip not found, skipping -> {clip_name}")
+                logger.warning(f"Clip not found, skipping: {clip_name}")
                 continue
 
             # 1. Load & trim from source — route images to ImageClip
@@ -322,7 +325,7 @@ class VideoEditor:
                 # Images have no duration of their own. Use the calculated target_duration.
                 if target_duration <= 0:
                     target_duration = 3.0  # fallback: 3 seconds for photos
-                    print(f"  Warning: no valid duration for image {clip_name}, defaulting to 3s.")
+                    logger.warning(f"No valid duration for image '{clip_name}', defaulting to 3s")
                 raw = ImageClip(clip_path, duration=target_duration)
                 clip = raw
                 safe_end = target_duration  # used in logging below
@@ -333,14 +336,14 @@ class VideoEditor:
                     actual_end = min(virtual_start + end_in, virtual_end, raw.duration)
                     safe_end = min(actual_end, raw.duration)
                     if safe_end <= actual_start:
-                        print(f"  Warning: invalid time range for virtual segment {clip_name}, skipping.")
+                        logger.warning(f"Invalid time range for virtual segment '{clip_name}', skipping")
                         raw.close()
                         continue
                     clip = raw.subclipped(actual_start, safe_end)
                 else:
                     safe_end = min(end_in, raw.duration)
                     if safe_end <= start_in:
-                        print(f"  Warning: invalid time range for {clip_name}, skipping.")
+                        logger.warning(f"Invalid time range for '{clip_name}', skipping")
                         raw.close()
                         continue
                     clip = raw.subclipped(start_in, safe_end)
@@ -416,23 +419,22 @@ class VideoEditor:
                     )
                     clip = CompositeVideoClip([clip, txt_clip])
                 except Exception as e:
-                    print(f"  Warning: Could not apply text overlay '{text_overlay}': {e}")
+                    logger.warning(f"Could not apply text overlay '{text_overlay}': {e}")
 
             processed_clips.append(clip)
             transitions.append(transition)
 
             media_type_label = "photo" if is_image else "video"
-            print(
-                f"  [{i+1}/{len(timeline)}] [{media_type_label}] {clip_name} | "
-                f"dur {clip.duration:.2f}s | "
-                f"transition: {transition} | pacing: {pacing}"
+            logger.info(
+                f"[{i+1}/{len(timeline)}] [{media_type_label}] {clip_name} | "
+                f"dur={clip.duration:.2f}s | transition={transition} | pacing={pacing}"
             )
 
         if not processed_clips:
             raise RuntimeError("No valid clips were processed. Check clips directory and EDL.")
 
         # 8. Assemble all clips with proper transition handling
-        print("Assembling clips on timeline...")
+        logger.info(f"Assembling {len(processed_clips)} clips on timeline...")
         final_video = self._assemble_timeline(
             processed_clips=processed_clips,
             transitions=transitions,
@@ -441,12 +443,12 @@ class VideoEditor:
         # Enforce exact target duration (truncate excess if LLM over-generated)
         target_duration = float(edl.get("total_duration", 0.0))
         if target_duration > 0 and final_video.duration > target_duration:
-            print(f"Trimming final video from {final_video.duration:.2f}s to exact target {target_duration:.2f}s")
+            logger.info(f"Trimming final video: {final_video.duration:.2f}s -> target {target_duration:.2f}s")
             final_video = final_video.subclipped(0, target_duration)
 
         # 9. Mix background music
         if music_path and os.path.exists(music_path):
-            print(f"Mixing background music: {music_path}")
+            logger.info(f"Mixing background music: {music_path}")
             music = AudioFileClip(music_path)
 
             music_start = float(edl.get("music_start_offset", 0.0))
@@ -473,7 +475,7 @@ class VideoEditor:
 
         # 10. Write output
         output_path = os.path.join(self.output_dir, output_filename)
-        print(f"Writing final video -> {output_path}")
+        logger.info(f"Writing final video -> {output_path}")
         final_video.write_videofile(
             output_path,
             codec="libx264",
@@ -490,9 +492,9 @@ class VideoEditor:
                 pass
         final_video.close()
 
-        print(f"Render complete! Output: {output_path}")
+        logger.info(f"Render complete! Output: {output_path}")
         return output_path
 
 
 if __name__ == "__main__":
-    print("VideoEditor module loaded successfully.")
+    logger.info("VideoEditor module loaded successfully.")
