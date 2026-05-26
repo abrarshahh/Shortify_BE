@@ -1,7 +1,10 @@
 import os
 import json
+import logging
 import warnings
 from typing import List, Dict, Any, Optional, Tuple
+
+logger = logging.getLogger("agents.subtitle")
 
 # Suppress FP16 warning on CPU
 warnings.filterwarnings("ignore", message="FP16 is not supported on CPU")
@@ -55,9 +58,9 @@ class SubtitleAgent:
         """Lazy-loads the Whisper model on first use."""
         if self._model is None:
             import whisper
-            print(f"Loading Whisper model '{self.model_size}' on {self.device}...")
+            logger.info(f"Loading Whisper model '{self.model_size}' on {self.device}...")
             self._model = whisper.load_model(self.model_size, device=self.device)
-            print("Whisper model loaded.")
+            logger.info("Whisper model loaded successfully")
         return self._model
 
     # ------------------------------------------------------------------
@@ -78,7 +81,7 @@ class SubtitleAgent:
             raise FileNotFoundError(f"Video not found: {video_path}")
 
         model = self._load_model()
-        print(f"Transcribing: {video_path}")
+        logger.info(f"Transcribing audio: {video_path}")
 
         # word_timestamps=True gives per-word timing (Whisper >= 20230314)
         result = model.transcribe(
@@ -189,7 +192,7 @@ class SubtitleAgent:
         )
         video.close()
         final.close()
-        print(f"Subtitled video saved -> {output_path}")
+        logger.info(f"Subtitled video saved -> {output_path}")
         return output_path
 
     def check_safe_zones(
@@ -320,4 +323,4 @@ class SubtitleAgent:
 
 
 if __name__ == "__main__":
-    print("SubtitleAgent module loaded successfully.")
+    logger.info("SubtitleAgent module loaded successfully.")

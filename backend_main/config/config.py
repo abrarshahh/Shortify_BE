@@ -22,16 +22,7 @@ Base = declarative_base()
 STORAGE_ROOT = Path("storage")
 STORAGE_ROOT.mkdir(exist_ok=True)
 
-LOG_DIR = Path("logs")
-LOG_DIR.mkdir(exist_ok=True)
-
 # ---------- LOGGING ----------
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_DIR / "app.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+from backend_ai.core.logging_config import setup_logging
+setup_logging()
+logger = logging.getLogger("backend_main")
