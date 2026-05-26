@@ -14,7 +14,13 @@ from moviepy import (
 from moviepy.audio.fx import MultiplyVolume, AudioFadeIn, AudioFadeOut
 from moviepy.video.fx import CrossFadeIn, CrossFadeOut, Resize, MultiplySpeed
 
-from backend_ai.core.config_loader import AGENTS_CONFIG
+from backend_ai.core.config import (
+    VIDEO_EDITOR_DEFAULT_FADE_DURATION,
+    VIDEO_EDITOR_MUSIC_VOLUME,
+    VIDEO_EDITOR_ORIGINAL_AUDIO_VOLUME,
+    VIDEO_EDITOR_PACING_SPEEDS,
+)
+from backend_ai.services.edl_validation_service import validate_edl
 
 
 class VideoEditor:
@@ -26,11 +32,7 @@ class VideoEditor:
     """
 
     # Speed multipliers for pacing styles defined by the director
-    PACING_SPEED = {
-        "speed-ramp": 1.5,
-        "jump-cut": 1.0,
-        "cinematic-slow": 0.75,
-    }
+    PACING_SPEED = VIDEO_EDITOR_PACING_SPEEDS
 
     IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif"}
 
@@ -39,11 +41,9 @@ class VideoEditor:
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
 
-        # Load config from agents_config.yaml
-        editor_config = AGENTS_CONFIG.get("video_editor", {})
-        self.DEFAULT_FADE_DURATION = editor_config.get("default_fade_duration", 0.3)
-        self.ORIGINAL_AUDIO_VOLUME = editor_config.get("original_audio_volume", 0.3)
-        self.MUSIC_VOLUME = editor_config.get("music_volume", 0.9)
+        self.DEFAULT_FADE_DURATION = VIDEO_EDITOR_DEFAULT_FADE_DURATION
+        self.ORIGINAL_AUDIO_VOLUME = VIDEO_EDITOR_ORIGINAL_AUDIO_VOLUME
+        self.MUSIC_VOLUME = VIDEO_EDITOR_MUSIC_VOLUME
         self.target_w = 1080
         self.target_h = 1920
 
@@ -246,6 +246,9 @@ class VideoEditor:
         """
         Renders the final video from an EDL produced by CreativeDirector.
         """
+        validated_edl = validate_edl(edl, self.clips_dir)
+        edl = validated_edl.model_dump(mode="json")
+
         timeline = edl.get("timeline", [])
         if not timeline:
             raise ValueError("EDL timeline is empty. Nothing to render.")

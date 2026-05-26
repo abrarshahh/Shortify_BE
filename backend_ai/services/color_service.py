@@ -2,7 +2,7 @@ import os
 import subprocess
 from typing import Dict, Any, Optional
 
-from backend_ai.core.config_loader import AGENTS_CONFIG
+from backend_ai.core.config import COLOR_GRADING_ENABLED, FFMPEG_PATH
 
 
 # ---------------------------------------------------------------------------
@@ -125,9 +125,8 @@ class ColorGradingAgent:
     """
 
     def __init__(self):
-        config = AGENTS_CONFIG.get("color_grading", {})
-        self.enabled = config.get("enabled", True)
-        self.ffmpeg_path = config.get("ffmpeg_path", "ffmpeg")
+        self.enabled = COLOR_GRADING_ENABLED
+        self.ffmpeg_path = FFMPEG_PATH
         
         # Ensure LUTs directory exists
         self.luts_dir = os.path.abspath(os.path.join("data", "luts"))

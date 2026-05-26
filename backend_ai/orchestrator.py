@@ -13,6 +13,8 @@ from backend_ai.services.subtitle_service import SubtitleAgent
 from backend_ai.services.color_service import ColorGradingAgent
 from backend_ai.services.analyst_service import ProjectAnalystAgent
 from backend_ai.services.thumbnail_service import ThumbnailAgent
+from backend_ai.services.edl_validation_service import validate_edl
+from backend_ai.schemas.edl import EDLGenerationError, EDLValidationError
 from backend_ai.core.config_loader import AGENTS_CONFIG
 
 # -------------------------------------------------------------------
@@ -39,6 +41,7 @@ class AgentState(TypedDict):
     transcription: Dict[str, Any]
     final_video_path: str
     retry_count: int
+    max_edl_retries: int
     pre_flight_report: Dict[str, Any]
     progress_callback: Optional[Callable[[int, str], None]]
 
@@ -174,25 +177,47 @@ class ShortifyOrchestrator:
             callback(65, "Creating storyboard and timeline...")
             
         feedback = state.get("edl_feedback")
-        
-        # If we have feedback from a previous safety failure, we should inform the LLM
-        # For now, since CreativeDirector doesn't natively accept a "feedback" parameter,
-        # we will append it to the project_title/prompt temporarily or we could just 
-        # let the director generate a new one with a modified prompt.
+        max_edl_retries = state.get("max_edl_retries", 0)
+        clips_dir = os.path.dirname(state["video_paths"][0]) if state.get("video_paths") else ""
+        if not clips_dir:
+            raise ValueError("No video paths provided for EDL validation.")
+
         prompt = state["project_title"]
-        
-        print(f"Generating EDL. Prompt: {prompt}")
-        edl = self.director_agent.generate_edl(
-            user_prompt=prompt,
-            media_analyses=state["visual_data"],
-            audio_analysis=state.get("rhythm_data", {}),
-            target_duration=state["target_duration"],
-            aspect_ratio=state["aspect_ratio"],
-            style=state["style"],
-            feedback=feedback
-        )
-        
-        return {"edl": edl, "edl_feedback": ""} # clear feedback after applying
+
+        while True:
+            print(f"Generating EDL. Prompt: {prompt}")
+            edl = self.director_agent.generate_edl(
+                user_prompt=prompt,
+                media_analyses=state["visual_data"],
+                audio_analysis=state.get("rhythm_data", {}),
+                target_duration=state["target_duration"],
+                aspect_ratio=state["aspect_ratio"],
+                style=state["style"],
+                feedback=feedback
+            )
+
+            try:
+                validated_edl = validate_edl(edl, clips_dir, target_duration=float(state["target_duration"]))
+                return {
+                    "edl": validated_edl.model_dump(mode="json"),
+                    "edl_feedback": "",
+                    "max_edl_retries": max_edl_retries,
+                }
+            except EDLValidationError as exc:
+                max_edl_retries += 1
+                state["max_edl_retries"] = max_edl_retries
+                feedback = exc.to_feedback()
+                state["edl_feedback"] = feedback
+
+                print(f"EDL validation failed (attempt {max_edl_retries}/3): {feedback}")
+                if max_edl_retries >= 3:
+                    raise EDLGenerationError(
+                        retry_count=max_edl_retries,
+                        last_error=feedback,
+                        issues=exc.issues,
+                    )
+
+                continue
 
     def node_render_video(self, state: AgentState) -> Dict:
         print("\n--- NODE: render_video ---")

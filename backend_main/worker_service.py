@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from backend_main.config import SessionLocal, STORAGE_ROOT, logger
 from backend_main.models import Project
 from backend_ai.orchestrator import ShortifyOrchestrator, AgentState
+from backend_ai.schemas.edl import EDLGenerationError
 
 # Thread-safe job state tracker (in-memory, acts as database fallback)
 render_jobs: Dict[str, Dict[str, Any]] = {}
@@ -104,6 +105,7 @@ def _execute_render_task(
             "transcription": {},
             "final_video_path": "",
             "retry_count": 0,
+            "max_edl_retries": 0,
             "pre_flight_report": {},
             "progress_callback": orchestrator_progress_callback,
         }
@@ -150,6 +152,14 @@ def _execute_render_task(
         })
         logger.info(f"[Worker] Job completed for project {project_id}")
 
+    except EDLGenerationError as e:
+        logger.error(f"[Worker] EDL generation failed for project {project_id}: {e}")
+        update_job(project_id, {
+            "status": "error",
+            "progress_percentage": 0,
+            "current_step": "EDL validation failed",
+            "message": str(e),
+        })
     except Exception as e:
         logger.error(f"[Worker] Job failed for project {project_id}: {e}")
         update_job(project_id, {
