@@ -1,19 +1,21 @@
 import os
 import numpy as np
 import logging
+import tempfile
+import shutil
 from typing import Dict, Any, Optional
 
+import ffmpeg
+
 from moviepy import (
+    AudioClip,
     VideoFileClip,
     ImageClip,
-    AudioFileClip,
     CompositeVideoClip,
-    CompositeAudioClip,
-    ColorClip,
     TextClip,
 )
-from moviepy.audio.fx import MultiplyVolume, AudioFadeIn, AudioFadeOut
-from moviepy.video.fx import CrossFadeIn, CrossFadeOut, Resize, MultiplySpeed
+from moviepy.audio.fx import MultiplyVolume
+from moviepy.video.fx import Resize, MultiplySpeed
 
 from backend_ai.core.config import (
     VIDEO_EDITOR_DEFAULT_FADE_DURATION,
@@ -98,141 +100,203 @@ class VideoEditor:
 
         return clip.with_effects([Resize(zoom_factor)])
 
+    def _build_ffmpeg_concat(
+        self,
+        clip_paths: list[str],
+        clip_durations: list[float],
+        transitions: list[str],
+        output_path: str,
+        music_path: Optional[str] = None,
+        music_start_offset: float = 0.0,
+    ) -> None:
+        """Assemble processed clips with FFmpeg's streaming filter graph."""
+        if not clip_paths:
+            raise RuntimeError("No processed clips were produced for FFmpeg assembly.")
+
+        if not (len(clip_paths) == len(clip_durations) == len(transitions)):
+            raise ValueError("FFmpeg assembly inputs must have matching lengths.")
+
+        transition_map = {
+            "crossfade": "fade",
+            "fade": "fade",
+            "dip_to_black": "fadeblack",
+            "slide_left": "slideleft",
+            "slide_right": "slideright",
+        }
+        temp_dir = tempfile.mkdtemp(prefix="ffmpeg_assemble_", dir=os.path.dirname(output_path))
+        current_path = clip_paths[0]
+        current_duration = float(clip_durations[0])
+
+        try:
+            for idx in range(1, len(clip_paths)):
+                transition = (transitions[idx] or "none").lower()
+                next_path = clip_paths[idx]
+                next_duration = float(clip_durations[idx])
+                stage_path = os.path.join(temp_dir, f"stage_{idx:03d}.mp4")
+
+                current_input = ffmpeg.input(current_path)
+                next_input = ffmpeg.input(next_path)
+
+                if transition in transition_map:
+                    fade_dur = min(self.DEFAULT_FADE_DURATION, current_duration / 2, next_duration / 2)
+                    if fade_dur > 0:
+                        offset = max(0.0, current_duration - fade_dur)
+                        video_stream = ffmpeg.filter(
+                            [current_input.video, next_input.video],
+                            "xfade",
+                            transition=transition_map[transition],
+                            duration=fade_dur,
+                            offset=offset,
+                        )
+
+                        if current_input.audio is not None and next_input.audio is not None:
+                            audio_stream = ffmpeg.filter(
+                                [current_input.audio, next_input.audio],
+                                "acrossfade",
+                                d=fade_dur,
+                            )
+                            stream = ffmpeg.output(
+                                video_stream,
+                                audio_stream,
+                                stage_path,
+                                vcodec="libx264",
+                                acodec="aac",
+                                pix_fmt="yuv420p",
+                                movflags="+faststart",
+                            )
+                        else:
+                            stream = ffmpeg.output(
+                                video_stream,
+                                stage_path,
+                                vcodec="libx264",
+                                pix_fmt="yuv420p",
+                                movflags="+faststart",
+                            )
+
+                        try:
+                            stream.overwrite_output().run(capture_stdout=True, capture_stderr=True)
+                        except ffmpeg.Error as exc:
+                            stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr)
+                            raise RuntimeError(f"FFmpeg transition assembly failed: {stderr[-2000:]}") from exc
+
+                        current_path = stage_path
+                        current_duration = current_duration + next_duration - fade_dur
+                        continue
+
+                if current_input.audio is not None and next_input.audio is not None:
+                    concat_node = ffmpeg.concat(
+                        current_input.video,
+                        next_input.video,
+                        n=2,
+                        v=1,
+                        a=0,
+                    )
+                    video_stream = concat_node.node.stream("v")
+                    audio_node = ffmpeg.concat(
+                        current_input.audio,
+                        next_input.audio,
+                        n=2,
+                        v=0,
+                        a=1,
+                    )
+                    audio_stream = audio_node.node.stream("a")
+                    stream = ffmpeg.output(
+                        video_stream,
+                        audio_stream,
+                        stage_path,
+                        vcodec="libx264",
+                        acodec="aac",
+                        pix_fmt="yuv420p",
+                        movflags="+faststart",
+                    )
+                else:
+                    concat_node = ffmpeg.concat(
+                        current_input.video,
+                        next_input.video,
+                        n=2,
+                        v=1,
+                        a=0,
+                    )
+                    stream = ffmpeg.output(
+                        concat_node.node.stream("v"),
+                        stage_path,
+                        vcodec="libx264",
+                        pix_fmt="yuv420p",
+                        movflags="+faststart",
+                    )
+
+                try:
+                    stream.overwrite_output().run(capture_stdout=True, capture_stderr=True)
+                except ffmpeg.Error as exc:
+                    stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr)
+                    raise RuntimeError(f"FFmpeg assembly failed: {stderr[-2000:]}") from exc
+
+                current_path = stage_path
+                current_duration += next_duration
+
+            output_args = {
+                "vcodec": "libx264",
+                "pix_fmt": "yuv420p",
+                "movflags": "+faststart",
+            }
+
+            final_input = ffmpeg.input(current_path)
+            if music_path and os.path.exists(music_path):
+                music_input = ffmpeg.input(music_path, stream_loop=-1)
+                music_audio = music_input.audio.filter(
+                    "atrim",
+                    start=max(0.0, music_start_offset),
+                    duration=current_duration,
+                ).filter("asetpts", "PTS-STARTPTS")
+                music_audio = music_audio.filter("volume", self.MUSIC_VOLUME)
+
+                fade_out_start = max(0.0, current_duration - 1.5)
+                music_audio = music_audio.filter("afade", t="out", st=fade_out_start, d=1.5)
+
+                if final_input.audio is not None:
+                    mixed_audio = ffmpeg.filter(
+                        [final_input.audio, music_audio],
+                        "amix",
+                        inputs=2,
+                        duration="first",
+                        dropout_transition=0,
+                    )
+                else:
+                    mixed_audio = music_audio
+
+                stream = ffmpeg.output(final_input.video, mixed_audio, output_path, acodec="aac", **output_args)
+            elif final_input.audio is not None:
+                stream = ffmpeg.output(final_input.video, final_input.audio, output_path, acodec="aac", **output_args)
+            else:
+                stream = ffmpeg.output(final_input.video, output_path, **output_args)
+
+            try:
+                stream.overwrite_output().run(capture_stdout=True, capture_stderr=True)
+            except ffmpeg.Error as exc:
+                stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr)
+                raise RuntimeError(f"FFmpeg assembly failed: {stderr[-2000:]}") from exc
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def _cleanup_temp_files(self, temp_files: list[str], temp_dir: Optional[str] = None) -> None:
+        for path in temp_files:
+            if not path:
+                continue
+            try:
+                if os.path.exists(path):
+                    os.unlink(path)
+            except Exception as e:
+                logger.warning(f"Failed to delete temp file {path}: {e}")
+
+        if temp_dir and os.path.isdir(temp_dir):
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
+
     # ------------------------------------------------------------------
     # Timeline Assembly
     # ------------------------------------------------------------------
-
-    def _assemble_timeline(self, processed_clips: list, transitions: list) -> "CompositeVideoClip":
-        """
-        Assembles processed clips into a final CompositeVideoClip using a
-        sequential cursor-based approach.
-
-        Each clip is placed relative to the previous one according to its
-        transition type. This correctly handles crossfade overlaps, dip-to-black
-        gaps, and all other transition types without the absolute positioning bug.
-
-        Args:
-            processed_clips: List of prepared VideoClip objects (resized, cropped,
-                             speed-adjusted, text applied). No with_start() applied.
-            transitions: List of transition strings (same length as processed_clips).
-                         transitions[0] is ignored (no transition before first clip).
-
-        Returns:
-            A CompositeVideoClip representing the fully assembled video.
-        """
-        FADE_DUR = self.DEFAULT_FADE_DURATION
-        FRAME_W = self.target_w
-        FRAME_H = self.target_h
-
-        layers = []
-        cursor = 0.0  # absolute timeline position for the next clip's start
-
-        for i, (clip, transition) in enumerate(zip(processed_clips, transitions)):
-            transition = transition.lower()
-
-            if i == 0 or transition in ("none", "jump_cut"):
-                # ── Hard cut ──────────────────────────────────────────────────
-                placed = clip.with_start(cursor)
-                cursor += clip.duration
-
-            elif transition in ("crossfade", "fade"):
-                # ── True overlap crossfade ─────────────────────────────────────
-                # Incoming clip starts fade_dur seconds before cursor so it
-                # overlaps the tail of the outgoing clip. Both have fade effects.
-                fade_dur = min(FADE_DUR, clip.duration / 2)
-
-                # Apply CrossFadeOut to the last placed layer (outgoing clip)
-                if layers:
-                    layers[-1] = layers[-1].with_effects([CrossFadeOut(fade_dur)])
-
-                # Apply CrossFadeIn to the incoming clip
-                overlap_start = max(0.0, cursor - fade_dur)
-                placed = clip.with_effects([CrossFadeIn(fade_dur)]).with_start(overlap_start)
-                cursor = overlap_start + clip.duration
-
-            elif transition == "dip_to_black":
-                # ── Dip to black ───────────────────────────────────────────────
-                # Outgoing fades to black, a black gap, incoming fades in from black.
-                fade_dur = min(FADE_DUR, clip.duration / 2)
-
-                if layers:
-                    layers[-1] = layers[-1].with_effects([CrossFadeOut(fade_dur)])
-
-                # Leave a half-fade gap filled by the black base layer
-                cursor += fade_dur
-
-                placed = clip.with_effects([CrossFadeIn(fade_dur)]).with_start(cursor)
-                cursor += clip.duration
-
-            elif transition in ("slide_left", "slide_right"):
-                # ── Slide transition ───────────────────────────────────────────
-                # Outgoing slides out, incoming slides in, with short overlap.
-                fade_dur = min(FADE_DUR, clip.duration / 2)
-                # direction: +1 = slide left (outgoing goes left, incoming from right)
-                direction = 1 if transition == "slide_left" else -1
-
-                # Slide out the outgoing clip
-                if layers:
-                    prev = layers[-1]
-                    prev_dur = prev.duration
-
-                    def make_slide_out_pos(p_dur, fd, dir, fw):
-                        def pos(t):
-                            tail_t = t - (p_dur - fd)
-                            if tail_t <= 0:
-                                return (0, 0)
-                            progress = min(tail_t / fd, 1.0)
-                            return (int(dir * fw * progress), 0)
-                        return pos
-
-                    layers[-1] = prev.with_position(make_slide_out_pos(prev_dur, fade_dur, direction, FRAME_W))
-
-                # Slide in the incoming clip from the opposite side
-                def make_slide_in_pos(fd, dir, fw):
-                    def pos(t):
-                        progress = min(t / fd, 1.0) if fd > 0 else 1.0
-                        start_x = -dir * fw
-                        return (int(start_x + dir * fw * progress), 0)
-                    return pos
-
-                overlap_start = max(0.0, cursor - fade_dur)
-                placed = clip.with_start(overlap_start).with_position(
-                    make_slide_in_pos(fade_dur, direction, FRAME_W)
-                )
-                cursor = overlap_start + clip.duration
-
-            elif transition == "glitch":
-                # ── Glitch effect ─────────────────────────────────────────────
-                # RGB channel shift on the incoming clip's first few frames.
-                glitch_frames = 6  # ~0.2s at 30fps
-
-                def apply_glitch(get_frame, t):
-                    frame = get_frame(t)
-                    frame_index = int(t * 30)
-                    if frame_index < glitch_frames:
-                        intensity = max(1, int(12 * (1 - frame_index / glitch_frames)))
-                        shifted = frame.copy()
-                        shifted[:, intensity:, 0] = frame[:, :-intensity, 0]
-                        shifted[:, :-intensity, 2] = frame[:, intensity:, 2]
-                        return shifted
-                    return frame
-
-                clip = clip.transform(apply_glitch)
-                placed = clip.with_start(cursor)
-                cursor += clip.duration
-
-            else:
-                # ── Unknown: treat as hard cut ────────────────────────────────
-                placed = clip.with_start(cursor)
-                cursor += clip.duration
-
-            layers.append(placed)
-
-        # Build the black base layer with the actual assembled duration
-        actual_duration = cursor
-        base = ColorClip(size=(FRAME_W, FRAME_H), color=(0, 0, 0), duration=actual_duration)
-
-        return CompositeVideoClip([base] + layers, size=(FRAME_W, FRAME_H))
 
     # ------------------------------------------------------------------
     # Public API
@@ -271,229 +335,219 @@ class VideoEditor:
         logger.info(f"Rendering '{title}' | aspect={aspect_ratio} | dims={self.target_w}x{self.target_h} | segments={len(timeline)}")
 
         processed_clips = []
+        processed_temp_files = []
+        processed_durations = []
         transitions = []
+        temp_dir = tempfile.mkdtemp(prefix="video_editor_", dir=self.output_dir)
         
         # Beat sync tracking
         beat_times = rhythm_data.get("beat_times", []) if rhythm_data else []
         accumulated_time = 0.0
 
-        for i, item in enumerate(timeline):
-            clip_name  = item.get("clip_name", "")
-            start_in   = float(item.get("start_in_clip", 0.0))
-            end_in     = float(item.get("end_in_clip", 0.0))
-            tl_start   = float(item.get("timeline_start", 0.0))
-            tl_end     = float(item.get("timeline_end", end_in - start_in))
-            transition = item.get("transition", "none").lower()
-            details    = item.get("details", {})
-            pacing     = details.get("pacing_style", "jump-cut").lower()
+        output_path = os.path.join(self.output_dir, output_filename)
 
-            # Dynamic Beat-Sync Snapping
-            raw_duration = tl_end - tl_start
-            target_duration = raw_duration
+        try:
+            for i, item in enumerate(timeline):
+                clip_name = item.get("clip_name", "")
+                start_in = float(item.get("start_in_clip", 0.0))
+                end_in = float(item.get("end_in_clip", 0.0))
+                tl_start = float(item.get("timeline_start", 0.0))
+                tl_end = float(item.get("timeline_end", end_in - start_in))
+                transition = item.get("transition", "none").lower()
+                details = item.get("details", {})
+                pacing = details.get("pacing_style", "jump-cut").lower()
 
-            if beat_times:
-                raw_tl_end = accumulated_time + raw_duration
-                nearest_beat = min(beat_times, key=lambda b: abs(b - raw_tl_end))
-                if abs(nearest_beat - raw_tl_end) <= 0.2:
-                    target_duration = max(0.1, nearest_beat - accumulated_time)
-                    logger.info(f"Beat sync: snapping clip end {raw_tl_end:.2f}s -> beat {nearest_beat:.2f}s (dur {raw_duration:.2f}s -> {target_duration:.2f}s)")
+                # Dynamic Beat-Sync Snapping
+                raw_duration = tl_end - tl_start
+                target_duration = raw_duration
 
-            accumulated_time += target_duration
+                if beat_times:
+                    raw_tl_end = accumulated_time + raw_duration
+                    nearest_beat = min(beat_times, key=lambda b: abs(b - raw_tl_end))
+                    if abs(nearest_beat - raw_tl_end) <= 0.2:
+                        target_duration = max(0.1, nearest_beat - accumulated_time)
+                        logger.info(
+                            f"Beat sync: snapping clip end {raw_tl_end:.2f}s -> beat {nearest_beat:.2f}s "
+                            f"(dur {raw_duration:.2f}s -> {target_duration:.2f}s)"
+                        )
 
-            # Parse virtual segment notation (filename:start:end)
-            virtual_start = 0.0
-            virtual_end = None
-            source_filename = clip_name
+                accumulated_time += target_duration
 
-            if ":" in clip_name:
-                parts = clip_name.split(":")
-                if len(parts) == 3:
-                    source_filename = parts[0]
-                    virtual_start = float(parts[1])
-                    virtual_end = float(parts[2])
+                # Parse virtual segment notation (filename:start:end)
+                virtual_start = 0.0
+                virtual_end = None
+                source_filename = clip_name
 
-            clip_path = os.path.join(self.clips_dir, source_filename)
-            if not os.path.exists(clip_path):
-                logger.warning(f"Clip not found, skipping: {clip_name}")
-                continue
+                if ":" in clip_name:
+                    parts = clip_name.split(":")
+                    if len(parts) == 3:
+                        source_filename = parts[0]
+                        virtual_start = float(parts[1])
+                        virtual_end = float(parts[2])
 
-            # 1. Load & trim from source — route images to ImageClip
-            ext = os.path.splitext(clip_path)[1].lower()
-            is_image = ext in self.IMAGE_EXTENSIONS
+                clip_path = os.path.join(self.clips_dir, source_filename)
+                if not os.path.exists(clip_path):
+                    logger.warning(f"Clip not found, skipping: {clip_name}")
+                    continue
 
-            if is_image:
-                # Images have no duration of their own. Use the calculated target_duration.
-                if target_duration <= 0:
-                    target_duration = 3.0  # fallback: 3 seconds for photos
-                    logger.warning(f"No valid duration for image '{clip_name}', defaulting to 3s")
-                raw = ImageClip(clip_path, duration=target_duration)
-                clip = raw
-                safe_end = target_duration  # used in logging below
-            else:
-                raw = VideoFileClip(clip_path)
-                if virtual_end is not None:
-                    actual_start = virtual_start + start_in
-                    actual_end = min(virtual_start + end_in, virtual_end, raw.duration)
-                    safe_end = min(actual_end, raw.duration)
-                    if safe_end <= actual_start:
-                        logger.warning(f"Invalid time range for virtual segment '{clip_name}', skipping")
-                        raw.close()
-                        continue
-                    clip = raw.subclipped(actual_start, safe_end)
-                else:
-                    safe_end = min(end_in, raw.duration)
-                    if safe_end <= start_in:
-                        logger.warning(f"Invalid time range for '{clip_name}', skipping")
-                        raw.close()
-                        continue
-                    clip = raw.subclipped(start_in, safe_end)
-
-            # 2. Resize and Center-Crop to dynamic aspect ratio
-            target_w, target_h = self.target_w, self.target_h
-            clip_w, clip_h = clip.size
-            
-            # Calculate scaling to fill target
-            scale = max(target_w / clip_w, target_h / clip_h)
-            new_w, new_h = int(clip_w * scale), int(clip_h * scale)
-            
-            # Resize
-            clip = clip.with_effects([Resize(width=new_w, height=new_h)])
-            
-            # Center crop
-            x1 = (new_w - target_w) // 2
-            y1 = (new_h - target_h) // 2
-            clip = clip.cropped(x1=x1, y1=y1, width=target_w, height=target_h)
-
-            # 3. Apply pacing style (speed multiplier — videos only)
-            if not is_image:
-                speed = self.PACING_SPEED.get(pacing, 1.0)
-                if speed != 1.0:
-                    clip = clip.with_effects([MultiplySpeed(speed)])
-
-            # 4. Match director-specified duration
-            # For videos: trim if over. For images: duration already set at load time.
-            if not is_image:
-                if target_duration > 0 and clip.duration > target_duration:
-                    clip = clip.subclipped(0, target_duration)
-
-            # 4b. Apply Ken Burns effect to photos
-            # Direction alternates per clip to add visual variety:
-            # even-indexed clips zoom in, odd-indexed clips zoom out.
-            if is_image:
-                kb_direction = "in" if i % 2 == 0 else "out"
-                clip = self._apply_ken_burns(clip, direction=kb_direction)
-
-            # 5. Duck original clip audio (only if background music is active)
-            if clip.audio is not None and music_path and os.path.exists(music_path):
-                # Only duck if there is actually audio in the clip and music is present
-                clip = clip.with_audio(
-                    clip.audio.with_effects([MultiplyVolume(self.ORIGINAL_AUDIO_VOLUME)])
-                )
-
-            # 6. Apply zoom transitions as clip-level effects (no overlap needed)
-            if transition == "zoom_in":
-                clip = clip.with_effects([Resize(lambda t: 1 + 0.04 * t)])
-            elif transition == "zoom_out":
-                clip = clip.with_effects([Resize(lambda t: max(0.1, 1.1 - 0.04 * t))])
-
-            # 7. Apply text overlay
-            text_overlay = item.get("text_overlay", "").strip()
-            if text_overlay:
+                raw = None
+                clip = None
                 try:
-                    font_path = self._find_font()
-                    w, h = clip.size
-                    txt_clip = TextClip(
-                        text=text_overlay,
-                        font=font_path,
-                        font_size=70,
-                        color="white",
-                        stroke_color="black",
-                        stroke_width=2,
-                        method="caption",
-                        size=(int(w * 0.8), None),
-                    )
-                    txt_clip = (
-                        txt_clip
-                        .with_duration(clip.duration)
-                        .with_position(("center", int(h * 0.15)))  # Upper-third safe zone
-                    )
-                    clip = CompositeVideoClip([clip, txt_clip])
-                except Exception as e:
-                    logger.warning(f"Could not apply text overlay '{text_overlay}': {e}")
+                    # 1. Load & trim from source — route images to ImageClip
+                    ext = os.path.splitext(clip_path)[1].lower()
+                    is_image = ext in self.IMAGE_EXTENSIONS
 
-            processed_clips.append(clip)
-            transitions.append(transition)
+                    if is_image:
+                        if target_duration <= 0:
+                            target_duration = 3.0
+                            logger.warning(f"No valid duration for image '{clip_name}', defaulting to 3s")
+                        raw = ImageClip(clip_path, duration=target_duration)
+                        clip = raw
+                    else:
+                        raw = VideoFileClip(clip_path)
+                        if virtual_end is not None:
+                            actual_start = virtual_start + start_in
+                            actual_end = min(virtual_start + end_in, virtual_end, raw.duration)
+                            safe_end = min(actual_end, raw.duration)
+                            if safe_end <= actual_start:
+                                logger.warning(f"Invalid time range for virtual segment '{clip_name}', skipping")
+                                continue
+                            clip = raw.subclipped(actual_start, safe_end)
+                        else:
+                            safe_end = min(end_in, raw.duration)
+                            if safe_end <= start_in:
+                                logger.warning(f"Invalid time range for '{clip_name}', skipping")
+                                continue
+                            clip = raw.subclipped(start_in, safe_end)
 
-            media_type_label = "photo" if is_image else "video"
-            logger.info(
-                f"[{i+1}/{len(timeline)}] [{media_type_label}] {clip_name} | "
-                f"dur={clip.duration:.2f}s | transition={transition} | pacing={pacing}"
+                    # 2. Resize and Center-Crop to dynamic aspect ratio
+                    target_w, target_h = self.target_w, self.target_h
+                    clip_w, clip_h = clip.size
+
+                    scale = max(target_w / clip_w, target_h / clip_h)
+                    new_w, new_h = int(clip_w * scale), int(clip_h * scale)
+
+                    clip = clip.with_effects([Resize(width=new_w, height=new_h)])
+
+                    x1 = (new_w - target_w) // 2
+                    y1 = (new_h - target_h) // 2
+                    clip = clip.cropped(x1=x1, y1=y1, width=target_w, height=target_h)
+
+                    # 3. Apply pacing style (speed multiplier — videos only)
+                    if not is_image:
+                        speed = self.PACING_SPEED.get(pacing, 1.0)
+                        if speed != 1.0:
+                            clip = clip.with_effects([MultiplySpeed(speed)])
+
+                    # 4. Match director-specified duration
+                    if not is_image and target_duration > 0 and clip.duration > target_duration:
+                        clip = clip.subclipped(0, target_duration)
+
+                    # 4b. Apply Ken Burns effect to photos
+                    if is_image:
+                        kb_direction = "in" if i % 2 == 0 else "out"
+                        clip = self._apply_ken_burns(clip, direction=kb_direction)
+
+                    # 5. Duck original clip audio when background music is active
+                    if clip.audio is not None and music_path and os.path.exists(music_path):
+                        clip = clip.with_audio(
+                            clip.audio.with_effects([MultiplyVolume(self.ORIGINAL_AUDIO_VOLUME)])
+                        )
+
+                    # Ensure every temporary export has an audio stream for FFmpeg concat.
+                    if clip.audio is None:
+                        clip = clip.with_audio(
+                            AudioClip(lambda t: np.array([0.0, 0.0]), duration=clip.duration, fps=44100)
+                        )
+
+                    # 6. Apply zoom transitions as clip-level effects (no overlap needed)
+                    if transition == "zoom_in":
+                        clip = clip.with_effects([Resize(lambda t: 1 + 0.04 * t)])
+                    elif transition == "zoom_out":
+                        clip = clip.with_effects([Resize(lambda t: max(0.1, 1.1 - 0.04 * t))])
+
+                    # 7. Apply text overlay
+                    text_overlay = item.get("text_overlay", "").strip()
+                    if text_overlay:
+                        try:
+                            font_path = self._find_font()
+                            w, h = clip.size
+                            txt_clip = TextClip(
+                                text=text_overlay,
+                                font=font_path,
+                                font_size=70,
+                                color="white",
+                                stroke_color="black",
+                                stroke_width=2,
+                                method="caption",
+                                size=(int(w * 0.8), None),
+                            )
+                            txt_clip = (
+                                txt_clip
+                                .with_duration(clip.duration)
+                                .with_position(("center", int(h * 0.15)))
+                            )
+                            clip = CompositeVideoClip([clip, txt_clip])
+                        except Exception as e:
+                            logger.warning(f"Could not apply text overlay '{text_overlay}': {e}")
+
+                    processed_clips.append(clip)
+                    processed_durations.append(float(clip.duration))
+                    transitions.append(transition)
+
+                    temp_path = os.path.join(temp_dir, f"clip_{len(processed_temp_files):03d}.mp4")
+                    temp_audio = os.path.join(temp_dir, f"clip_{len(processed_temp_files):03d}.m4a")
+                    processed_temp_files.append(temp_path)
+                    logger.info(f"Exporting processed clip -> {temp_path}")
+                    clip.write_videofile(
+                        temp_path,
+                        codec="libx264",
+                        audio_codec="aac",
+                        temp_audiofile=temp_audio,
+                        remove_temp=True,
+                        logger=None,
+                    )
+
+                    media_type_label = "photo" if is_image else "video"
+                    logger.info(
+                        f"[{i+1}/{len(timeline)}] [{media_type_label}] {clip_name} | "
+                        f"dur={clip.duration:.2f}s | transition={transition} | pacing={pacing}"
+                    )
+                finally:
+                    if raw is not None:
+                        try:
+                            raw.close()
+                        except Exception:
+                            pass
+
+                    if clip is not None:
+                        try:
+                            clip.close()
+                        except Exception:
+                            pass
+
+            if not processed_temp_files:
+                raise RuntimeError("No valid clips were processed. Check clips directory and EDL.")
+
+            logger.info(f"Assembling {len(processed_temp_files)} clips with FFmpeg...")
+            self._build_ffmpeg_concat(
+                clip_paths=processed_temp_files,
+                clip_durations=processed_durations,
+                transitions=transitions,
+                output_path=output_path,
+                music_path=music_path,
+                music_start_offset=float(edl.get("music_start_offset", 0.0)),
             )
 
-        if not processed_clips:
-            raise RuntimeError("No valid clips were processed. Check clips directory and EDL.")
-
-        # 8. Assemble all clips with proper transition handling
-        logger.info(f"Assembling {len(processed_clips)} clips on timeline...")
-        final_video = self._assemble_timeline(
-            processed_clips=processed_clips,
-            transitions=transitions,
-        )
-
-        # Enforce exact target duration (truncate excess if LLM over-generated)
-        target_duration = float(edl.get("total_duration", 0.0))
-        if target_duration > 0 and final_video.duration > target_duration:
-            logger.info(f"Trimming final video: {final_video.duration:.2f}s -> target {target_duration:.2f}s")
-            final_video = final_video.subclipped(0, target_duration)
-
-        # 9. Mix background music
-        if music_path and os.path.exists(music_path):
-            logger.info(f"Mixing background music: {music_path}")
-            music = AudioFileClip(music_path)
-
-            music_start = float(edl.get("music_start_offset", 0.0))
-            music_end = music_start + final_video.duration
-
-            if music_end > music.duration:
-                music_start = max(0, music.duration - final_video.duration)
-                music_end = music.duration
-
-            music = music.subclipped(music_start, music_end)
-
-            # Professional music finishing
-            from moviepy.audio.fx import AudioFadeOut
-            music = music.with_effects([
-                MultiplyVolume(self.MUSIC_VOLUME),
-                AudioFadeOut(1.5)
-            ])
-
-            if final_video.audio:
-                mixed = CompositeAudioClip([final_video.audio, music])
-            else:
-                mixed = music
-            final_video = final_video.with_audio(mixed)
-
-        # 10. Write output
-        output_path = os.path.join(self.output_dir, output_filename)
-        logger.info(f"Writing final video -> {output_path}")
-        final_video.write_videofile(
-            output_path,
-            codec="libx264",
-            audio_codec="aac",
-            temp_audiofile=os.path.join(self.output_dir, "temp_audio.m4a"),
-            remove_temp=True,
-            logger="bar",
-        )
-
-        for clip in processed_clips:
-            try:
-                clip.close()
-            except Exception:
-                pass
-        final_video.close()
-
-        logger.info(f"Render complete! Output: {output_path}")
-        return output_path
+            logger.info(f"Render complete! Output: {output_path}")
+            return output_path
+        finally:
+            for clip in processed_clips:
+                try:
+                    clip.close()
+                except Exception:
+                    pass
+            self._cleanup_temp_files(processed_temp_files, temp_dir=temp_dir)
 
 
 if __name__ == "__main__":
