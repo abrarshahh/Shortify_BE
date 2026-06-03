@@ -118,6 +118,7 @@ def _execute_render_task(
 
         final_video = final_state.get("final_video_path", "")
         verdict = final_state.get("safe_zone_report", {}).get("verdict", "N/A")
+        skipped_clips = final_state.get("skipped_clips", [])
 
         # Clean up intermediate render files to save disk space
         for path_key in ["rendered_video_path", "color_graded_path"]:
@@ -148,6 +149,7 @@ def _execute_render_task(
             "current_step": "Complete!",
             "final_video_path": final_video,
             "safe_zone_verdict": verdict,
+            "skipped_clips": skipped_clips,
             "message": "Render completed successfully."
         })
         logger.info(f"[Worker] Job completed for project {project_id}")
@@ -159,6 +161,7 @@ def _execute_render_task(
             "progress_percentage": 0,
             "current_step": "EDL validation failed",
             "message": str(e),
+            "skipped_clips": []
         })
     except Exception as e:
         logger.error(f"[Worker] Job failed for project {project_id}: {e}")
@@ -166,7 +169,8 @@ def _execute_render_task(
             "status": "error",
             "progress_percentage": 0,
             "current_step": "Failed",
-            "message": str(e)
+            "message": str(e),
+            "skipped_clips": []
         })
     finally:
         # Always reset rendering flag in DB

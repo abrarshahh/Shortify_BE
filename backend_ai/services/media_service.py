@@ -57,210 +57,259 @@ class MediaAnalyst:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Video file not found: {file_path}")
 
-        # Check Cache
+        # Check Cache with 7-day TTL check
         cache_path = self._get_cache_path(file_path)
         if os.path.exists(cache_path):
-            logger.info(f"MediaAnalyst: Found cached analysis for: {file_path}")
-            try:
-                with open(cache_path, "r") as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.error(f"MediaAnalyst: Error reading cache: {e}")
+            cache_mtime = os.path.getmtime(cache_path)
+            age_seconds = time.time() - cache_mtime
+            seven_days_seconds = 7 * 24 * 3600
+            
+            if age_seconds > seven_days_seconds:
+                logger.info(f"MediaAnalyst: Cache has expired (age: {age_seconds / 3600:.1f} hours > 7 days). Invalidating cache.")
+                try:
+                    os.remove(cache_path)
+                except Exception as ex:
+                    logger.warning(f"MediaAnalyst: Could not delete expired cache file: {ex}")
+            else:
+                logger.info(f"MediaAnalyst: Found cached analysis for: {file_path}")
+                try:
+                    with open(cache_path, "r") as f:
+                        return json.load(f)
+                except Exception as e:
+                    logger.error(f"MediaAnalyst: Error reading cache: {e}")
 
         file_metadata = self._get_file_metadata(file_path)
         is_image = file_metadata.get("media_type") == "photo"
         logger.info(f"MediaAnalyst: Uploading {'image' if is_image else 'video'} to Gemini. Path: {file_path}")
         
-        # Upload using the new SDK (file is the correct argument)
-        video_file = self.client.files.upload(file=file_path)
+        # Upload using the new SDK with exponential backoff + jitter
+        max_upload_retries = 5
+        upload_backoff = 2.0
+        video_file = None
         
-        # Wait for the file to be processed
-        while video_file.state.name == "PROCESSING":
-            logger.info("MediaAnalyst: Waiting for video processing on Gemini...")
-            time.sleep(5)
-            video_file = self.client.files.get(name=video_file.name)
-
-        if video_file.state.name == "FAILED":
-            raise Exception(f"Video processing failed: {video_file.state.name}")
-
-        logger.info(f"MediaAnalyst: Video processed successfully. Name on Gemini: {video_file.name}")
-
-        if is_image:
-            prompt = """
-            Analyze this photo for a short-form content editor.
-
-            Output MUST be a valid JSON object with the following structure:
-            {
-              "summary": "Detailed description of the photo content",
-              "mood": "Visual mood (e.g., Energetic, Calm, Dark, Vibrant)",
-              "lighting": "Description of lighting conditions",
-              "subjects": ["List of main subjects or objects visible"],
-              "inferred_metadata": {
-                 "inferred_location": "Inferred location if applicable",
-                 "time_of_day": "Inferred time of day",
-                 "camera_movement": "static"
-              },
-              "audio": {
-                 "captions": [],
-                 "audio_mood": "none",
-                 "audio_features": "none"
-              },
-              "interesting_segments": [
-                {
-                  "start": 0.0,
-                  "end": 3.0,
-                  "description": "The entire photo — describe the most visually compelling aspect",
-                  "priority_score": 8.0,
-                  "energy_score": 0.7,
-                  "is_hook": true,
-                  "should_be_used": true,
-                  "segment_focus": "one word describing the main subject"
-                }
-              ],
-              "all_segments": [
-                {
-                  "start": 0.0,
-                  "end": 3.0,
-                  "description": "Full description of the photo",
-                  "audio_description": "none",
-                  "priority_score": 8.0,
-                  "should_be_used": true,
-                  "segment_focus": "one word describing the main subject"
-                }
-              ]
-            }
-
-            Important: Only return the raw JSON object. No markdown.
-            """
-        else:
-            prompt = """
-            Analyze this video for a short-form content editor. Listen to the audio track and watch the visual track carefully.
-            
-            Output MUST be a valid JSON object with the following structure:
-            {
-              "summary": "Complete and detailed summary of the entire video content",
-              "mood": "Overall visual and thematic mood (e.g., Energetic, Calm, Dark, Vibrant)",
-              "lighting": "Detailed description of lighting conditions",
-              "subjects": ["Detailed list of main subjects, people, or objects in the video"],
-              "inferred_metadata": {
-                 "inferred_location": "Inferred location if applicable",
-                 "time_of_day": "Inferred time of day",
-                 "camera_movement": "Description of camera movement (e.g., static, handheld, panning)"
-              },
-              "audio": {
-                 "captions": ["List of transcribed spoken sentences/captions extracted from the audio, if any. Keep chronological."],
-                 "audio_mood": "Overall mood of the audio/music/speech",
-                 "audio_features": "Description of audio elements (e.g., background noise, music genre, sound effects)"
-              },
-              "interesting_segments": [
-                {
-                  "start": float,
-                  "end": float,
-                  "description": "Why this segment is visually or audibly interesting",
-                  "priority_score": float (1-10, rate the overall value/importance of this segment),
-                  "energy_score": float (0-1),
-                  "is_hook": boolean,
-                  "should_be_used": boolean,
-                  "segment_focus": "string (STRICTLY ONE SINGLE WORD describing the main focus, e.g., mountain, person, river, snow)"
-                }
-              ],
-              "all_segments": [
-                {
-                  "start": float,
-                  "end": float,
-                  "description": "Detailed visual description of what is happening in this segment",
-                  "audio_description": "What is heard in this segment",
-                  "priority_score": float (1-10, rate the overall aesthetic and narrative value of this segment),
-                  "should_be_used": boolean (True if this segment is highly recommended for the final video),
-                  "segment_focus": "string (STRICTLY ONE SINGLE WORD describing the main subject or theme)"
-                }
-              ]
-            }
-            
-            Important Instructions:
-            1. "all_segments": Break the ENTIRE video down into chronological, sequential segments. Let the natural action dictate the duration of each segment. Segment the video at natural boundaries such as camera cuts, changes in scene, or major shifts in action/subject. A segment can be short or long depending on the action. Give each segment a priority_score based on how useful it would be for a highlight reel.
-            2. "captions": Accurately transcribe any speech heard in the video into the captions list.
-            3. Do not include any markdown formatting or extra text. Only return the raw JSON object.
-            """
-
-        # Generate content using the new SDK with model fallback and exponential backoff
-        all_models = [self.primary_model] + self.fallback_models
-        last_error = None
-        
-        for model_id in all_models:
-            logger.info(f"MediaAnalyst: Attempting analysis with model: {model_id}")
-            max_retries = 3
-            base_delay = 3
-            
-            success = False
-            for attempt in range(max_retries):
-                try:
-                    response = self.client.models.generate_content(
-                        model=model_id,
-                        contents=[video_file, prompt],
-                        config=types.GenerateContentConfig(
-                            response_mime_type="application/json"
-                        )
-                    )
-                    success = True
-                    break # Success with this model!
-                except Exception as e:
-                    last_error = e
-                    if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                        if attempt < max_retries - 1:
-                            delay = base_delay * (2 ** attempt)
-                            logger.warning(f"MediaAnalyst: Quota exceeded for {model_id}. Retrying in {delay}s... (Attempt {attempt + 1}/{max_retries})")
-                            time.sleep(delay)
-                            continue
-                        else:
-                            logger.warning(f"MediaAnalyst: Quota exhausted for {model_id}. Switching to fallback model if available...")
-                            break # Try next model
-                    raise e # Re-raise if not a rate limit
-            
-            if success:
+        for attempt in range(max_upload_retries):
+            try:
+                video_file = self.client.files.upload(file=file_path)
                 break
-        else:
-            # If we exhausted all models
-            raise last_error if last_error else Exception("All models failed analysis")
+            except Exception as e:
+                err_msg = str(e).lower()
+                is_transient = any(phrase in err_msg for phrase in [
+                    "429", "rate limit", "quota exceeded", "resource exhausted",
+                    "timeout", "too many requests", "service unavailable", "503"
+                ])
+                if not is_transient or attempt >= max_upload_retries - 1:
+                    logger.error(f"MediaAnalyst: Non-retryable error during upload or retries exhausted: {e}")
+                    raise e
+                import random
+                jitter = random.uniform(0.8, 1.2)
+                sleep_time = upload_backoff * jitter
+                logger.warning(
+                    f"MediaAnalyst: Upload failed due to transient error: {e}. "
+                    f"Retrying in {sleep_time:.2f}s... (Attempt {attempt + 1}/{max_upload_retries})"
+                )
+                time.sleep(sleep_time)
+                upload_backoff *= 2.0
+
+        if video_file is None:
+            raise Exception("Failed to upload video file to Gemini.")
 
         try:
-            # The new SDK might return a parsed object if response_mime_type is set,
-            # but let's handle it safely as text just in case.
-            text = response.text.strip()
-            # Remove markdown if it somehow snuck in (though response_mime_type should prevent it)
-            if text.startswith("```"):
-                text = text.split("\n", 1)[1].rsplit("\n", 1)[0]
-            
-            analysis = json.loads(text)
-            
-            # Extract technical metadata locally
-            # Combine results
-            final_result = {
-                "file_metadata": file_metadata,
-                **analysis
-            }
-            
-            # Save to Cache
-            try:
-                with open(cache_path, "w") as f:
-                    json.dump(final_result, f, indent=2)
-                logger.info(f"MediaAnalyst: Analysis cached successfully: {cache_path}")
-            except Exception as e:
-                logger.error(f"MediaAnalyst: Error writing cache: {e}")
+            # Wait for the file to be processed
+            while video_file.state.name == "PROCESSING":
+                logger.info("MediaAnalyst: Waiting for video processing on Gemini...")
+                time.sleep(5)
+                video_file = self.client.files.get(name=video_file.name)
+
+            if video_file.state.name == "FAILED":
+                raise Exception(f"Video processing failed: {video_file.state.name}")
+
+            logger.info(f"MediaAnalyst: Video processed successfully. Name on Gemini: {video_file.name}")
+
+            if is_image:
+                prompt = """
+                Analyze this photo for a short-form content editor.
+
+                Output MUST be a valid JSON object with the following structure:
+                {
+                  "summary": "Detailed description of the photo content",
+                  "mood": "Visual mood (e.g., Energetic, Calm, Dark, Vibrant)",
+                  "lighting": "Description of lighting conditions",
+                  "subjects": ["List of main subjects or objects visible"],
+                  "inferred_metadata": {
+                     "inferred_location": "Inferred location if applicable",
+                     "time_of_day": "Inferred time of day",
+                     "camera_movement": "static"
+                  },
+                  "audio": {
+                     "captions": [],
+                     "audio_mood": "none",
+                     "audio_features": "none"
+                  },
+                  "interesting_segments": [
+                    {
+                      "start": 0.0,
+                      "end": 3.0,
+                      "description": "The entire photo — describe the most visually compelling aspect",
+                      "priority_score": 8.0,
+                      "energy_score": 0.7,
+                      "is_hook": true,
+                      "should_be_used": true,
+                      "segment_focus": "one word describing the main subject"
+                    }
+                  ],
+                  "all_segments": [
+                    {
+                      "start": 0.0,
+                      "end": 3.0,
+                      "description": "Full description of the photo",
+                      "audio_description": "none",
+                      "priority_score": 8.0,
+                      "should_be_used": true,
+                      "segment_focus": "one word describing the main subject"
+                    }
+                  ]
+                }
+
+                Important: Only return the raw JSON object. No markdown.
+                """
+            else:
+                prompt = """
+                Analyze this video for a short-form content editor. Listen to the audio track and watch the visual track carefully.
                 
-            logger.info(
-                f"MediaAnalyst: Analysis completed. Visual Mood: {final_result.get('mood')}, "
-                f"Lighting: {final_result.get('lighting')}, "
-                f"Main Subjects: {final_result.get('subjects')}, "
-                f"Highlights detected: {len(final_result.get('interesting_segments', []))}"
-            )
-            return final_result
-        except Exception as e:
-            logger.error(f"MediaAnalyst: Error parsing Gemini response: {e}")
-            return {
-                "raw_response": response.text if response else "No response",
-                "error": f"Failed to parse structured JSON: {str(e)}"
-            }
+                Output MUST be a valid JSON object with the following structure:
+                {
+                  "summary": "Complete and detailed summary of the entire video content",
+                  "mood": "Overall visual and thematic mood (e.g., Energetic, Calm, Dark, Vibrant)",
+                  "lighting": "Detailed description of lighting conditions",
+                  "subjects": ["Detailed list of main subjects, people, or objects in the video"],
+                  "inferred_metadata": {
+                     "inferred_location": "Inferred location if applicable",
+                     "time_of_day": "Inferred time of day",
+                     "camera_movement": "Description of camera movement (e.g., static, handheld, panning)"
+                  },
+                  "audio": {
+                     "captions": ["List of transcribed spoken sentences/captions extracted from the audio, if any. Keep chronological."],
+                     "audio_mood": "Overall mood of the audio/music/speech",
+                     "audio_features": "Description of audio elements (e.g., background noise, music genre, sound effects)"
+                  },
+                  "interesting_segments": [
+                    {
+                      "start": float,
+                      "end": float,
+                      "description": "Why this segment is visually or audibly interesting",
+                      "priority_score": float (1-10, rate the overall value/importance of this segment),
+                      "energy_score": float (0-1),
+                      "is_hook": boolean,
+                      "should_be_used": boolean,
+                      "segment_focus": "string (STRICTLY ONE SINGLE WORD describing the main focus, e.g., mountain, person, river, snow)"
+                    }
+                  ],
+                  "all_segments": [
+                    {
+                      "start": float,
+                      "end": float,
+                      "description": "Detailed visual description of what is happening in this segment",
+                      "audio_description": "What is heard in this segment",
+                      "priority_score": float (1-10, rate the overall aesthetic and narrative value of this segment),
+                      "should_be_used": boolean (True if this segment is highly recommended for the final video),
+                      "segment_focus": "string (STRICTLY ONE SINGLE WORD describing the main subject or theme)"
+                    }
+                  ]
+                }
+                
+                Important Instructions:
+                1. "all_segments": Break the ENTIRE video down into chronological, sequential segments. Let the natural action dictate the duration of each segment. Segment the video at natural boundaries such as camera cuts, changes in scene, or major shifts in action/subject. A segment can be short or long depending on the action. Give each segment a priority_score based on how useful it would be for a highlight reel.
+                2. "captions": Accurately transcribe any speech heard in the video into the captions list.
+                3. Do not include any markdown formatting or extra text. Only return the raw JSON object.
+                """
+
+            # Generate content using the new SDK with model fallback and exponential backoff
+            all_models = [self.primary_model] + self.fallback_models
+            last_error = None
+            response = None
+            
+            for model_id in all_models:
+                logger.info(f"MediaAnalyst: Attempting analysis with model: {model_id}")
+                max_retries = 3
+                base_delay = 3
+                
+                success = False
+                for attempt in range(max_retries):
+                    try:
+                        response = self.client.models.generate_content(
+                            model=model_id,
+                            contents=[video_file, prompt],
+                            config=types.GenerateContentConfig(
+                                response_mime_type="application/json"
+                            )
+                        )
+                        success = True
+                        break # Success with this model!
+                    except Exception as e:
+                        last_error = e
+                        if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                            if attempt < max_retries - 1:
+                                delay = base_delay * (2 ** attempt)
+                                logger.warning(f"MediaAnalyst: Quota exceeded for {model_id}. Retrying in {delay}s... (Attempt {attempt + 1}/{max_retries})")
+                                time.sleep(delay)
+                                continue
+                            else:
+                                logger.warning(f"MediaAnalyst: Quota exhausted for {model_id}. Switching to fallback model if available...")
+                                break # Try next model
+                        raise e # Re-raise if not a rate limit
+                
+                if success:
+                    break
+            else:
+                # If we exhausted all models
+                raise last_error if last_error else Exception("All models failed analysis")
+
+            try:
+                # The new SDK might return a parsed object if response_mime_type is set,
+                # but let's handle it safely as text just in case.
+                text = response.text.strip()
+                # Remove markdown if it somehow snuck in (though response_mime_type should prevent it)
+                if text.startswith("```"):
+                    text = text.split("\n", 1)[1].rsplit("\n", 1)[0]
+                
+                analysis = json.loads(text)
+                
+                # Extract technical metadata locally
+                # Combine results
+                final_result = {
+                    "file_metadata": file_metadata,
+                    **analysis
+                }
+                
+                # Save to Cache
+                try:
+                    with open(cache_path, "w") as f:
+                        json.dump(final_result, f, indent=2)
+                    logger.info(f"MediaAnalyst: Analysis cached successfully: {cache_path}")
+                except Exception as e:
+                    logger.error(f"MediaAnalyst: Error writing cache: {e}")
+                    
+                logger.info(
+                    f"MediaAnalyst: Analysis completed. Visual Mood: {final_result.get('mood')}, "
+                    f"Lighting: {final_result.get('lighting')}, "
+                    f"Main Subjects: {final_result.get('subjects')}, "
+                    f"Highlights detected: {len(final_result.get('interesting_segments', []))}"
+                )
+                return final_result
+            except Exception as e:
+                logger.error(f"MediaAnalyst: Error parsing Gemini response: {e}")
+                return {
+                    "raw_response": response.text if response else "No response",
+                    "error": f"Failed to parse structured JSON: {str(e)}"
+                }
+        finally:
+            if video_file is not None:
+                try:
+                    logger.info(f"MediaAnalyst: Deleting remote Gemini file {video_file.name} to conserve storage quota...")
+                    self.client.files.delete(name=video_file.name)
+                    logger.info("MediaAnalyst: Remote Gemini file deleted successfully.")
+                except Exception as e:
+                    logger.warning(f"MediaAnalyst: Failed to delete remote Gemini file {video_file.name}: {e}")
 
 if __name__ == "__main__":
     # Test script

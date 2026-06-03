@@ -1,7 +1,7 @@
 import os
 import numpy as np
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 
 from moviepy import (
     VideoFileClip,
@@ -11,6 +11,8 @@ from moviepy import (
     CompositeAudioClip,
     ColorClip,
     TextClip,
+    concatenate_videoclips,
+    concatenate_audioclips,
 )
 from moviepy.audio.fx import MultiplyVolume, AudioFadeIn, AudioFadeOut
 from moviepy.video.fx import CrossFadeIn, CrossFadeOut, Resize, MultiplySpeed
@@ -22,8 +24,37 @@ from backend_ai.core.config import (
     VIDEO_EDITOR_PACING_SPEEDS,
 )
 from backend_ai.services.edl_validation_service import validate_edl
+from backend_ai.core.config_loader import AGENTS_CONFIG
 
 logger = logging.getLogger("agents.editor")
+
+
+def detect_face_center(frame_rgb: np.ndarray) -> Optional[Tuple[float, float]]:
+    """
+    Analyzes an RGB frame using OpenCV's built-in Haar Cascade Face Detector.
+    Returns normalized (x_center, y_center) of the first/most prominent face, if found.
+    """
+    try:
+        import cv2
+        gray = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
+        cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+        face_cascade = cv2.CascadeClassifier(cascade_path)
+        if face_cascade.empty():
+            logger.warning("OpenCV face cascade path is empty or could not be loaded.")
+            return None
+            
+        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+        if len(faces) > 0:
+            # Sort by bounding box area to center on the largest/most prominent face
+            faces = sorted(faces, key=lambda f: f[2] * f[3], reverse=True)
+            x, y, w, h = faces[0]
+            height, width = gray.shape
+            x_center = (x + w / 2) / width
+            y_center = (y + h / 2) / height
+            return float(x_center), float(y_center)
+    except Exception as e:
+        logger.warning(f"Face detection failed during cropping: {e}")
+    return None
 
 
 class VideoEditor:
@@ -49,6 +80,94 @@ class VideoEditor:
         self.MUSIC_VOLUME = VIDEO_EDITOR_MUSIC_VOLUME
         self.target_w = 1080
         self.target_h = 1920
+
+        # Load video editor config for beat snapping tolerances
+        editor_config = AGENTS_CONFIG.get("video_editor", {})
+        self.default_beat_snap_tolerance = float(editor_config.get("default_beat_snap_tolerance", 0.2))
+        self.beat_snap_tolerances = editor_config.get("beat_snap_tolerances", {})
+
+    def _remove_silence(self, clip: VideoFileClip, top_db: float = 30.0) -> VideoFileClip:
+        """
+        Removes silent intervals from the clip's audio using librosa.
+        Slices and concatenates non-silent video intervals.
+        """
+        if clip.audio is None:
+            return clip
+
+        try:
+            import librosa
+            sr = 22050
+            # to_soundarray returns shape (N, 2) for stereo or (N, 1) for mono
+            audio_data = clip.audio.to_soundarray(fps=sr)
+            if audio_data.size == 0:
+                return clip
+
+            if audio_data.ndim > 1:
+                y = np.mean(audio_data, axis=1)
+            else:
+                y = audio_data
+
+            intervals = librosa.effects.split(y, top_db=top_db)
+            if len(intervals) == 0:
+                # If everything is detected as silence, keep the clip as-is to be safe
+                logger.warning("Silence removal: whole clip detected as silent. Keeping as-is.")
+                return clip
+
+            # Check if non-silent intervals already cover the entire clip duration (within a small threshold)
+            # This avoids redundant sub-clipping and concatenation
+            total_detected = sum(end - start for start, end in intervals) / sr
+            if abs(total_detected - clip.duration) < 0.2 and len(intervals) == 1:
+                return clip
+
+            subclips = []
+            for start_idx, end_idx in intervals:
+                start_t = start_idx / sr
+                end_t = end_idx / sr
+                
+                # Constrain boundaries
+                start_t = max(0.0, start_t)
+                end_t = min(clip.duration, end_t)
+                
+                if end_t > start_t + 0.1:  # skip extremely tiny blips less than 100ms
+                    subclips.append(clip.subclipped(start_t, end_t))
+
+            if subclips:
+                logger.info(f"Silence removal: shortened clip from {clip.duration:.2f}s to {sum(c.duration for c in subclips):.2f}s")
+                non_silent_clip = concatenate_videoclips(subclips)
+                return non_silent_clip
+        except Exception as e:
+            logger.warning(f"Silence detection failed, continuing without silence removal: {e}")
+
+        return clip
+
+    def _normalize_audio(self, clip: VideoFileClip, target_rms: float = 0.15) -> VideoFileClip:
+        """
+        Normalizes the audio levels of the clip to target RMS level (approx -14 LUFS).
+        """
+        if clip.audio is None:
+            return clip
+
+        try:
+            sr = 22050
+            audio_data = clip.audio.to_soundarray(fps=sr)
+            if audio_data.size == 0:
+                return clip
+
+            # Calculate Root Mean Square (RMS) energy
+            rms = np.sqrt(np.mean(audio_data ** 2))
+            
+            if rms > 1e-4:
+                gain = target_rms / rms
+                # Limit minimum/maximum gain factor to keep it clean and prevent excessive noise boost
+                gain = min(max(gain, 0.1), 5.0)
+                
+                if abs(gain - 1.0) > 0.05:  # Only apply if gain changes significantly
+                    logger.info(f"Audio normalization: applying volume gain of {gain:.2f}x (RMS: {rms:.4f} -> {target_rms:.4f})")
+                    clip = clip.with_audio(clip.audio.with_effects([MultiplyVolume(gain)]))
+        except Exception as e:
+            logger.warning(f"Audio normalization failed, continuing without normalization: {e}")
+
+        return clip
 
     def _find_font(self) -> str:
         """Finds a suitable TTF font on the system for text overlays."""
@@ -249,6 +368,7 @@ class VideoEditor:
         """
         Renders the final video from an EDL produced by CreativeDirector.
         """
+        self.skipped_clips = []
         validated_edl = validate_edl(edl, self.clips_dir)
         edl = validated_edl.model_dump(mode="json")
 
@@ -294,9 +414,11 @@ class VideoEditor:
             if beat_times:
                 raw_tl_end = accumulated_time + raw_duration
                 nearest_beat = min(beat_times, key=lambda b: abs(b - raw_tl_end))
-                if abs(nearest_beat - raw_tl_end) <= 0.2:
+                # Look up pacing-specific tolerance
+                tolerance = float(self.beat_snap_tolerances.get(pacing, self.default_beat_snap_tolerance))
+                if abs(nearest_beat - raw_tl_end) <= tolerance:
                     target_duration = max(0.1, nearest_beat - accumulated_time)
-                    logger.info(f"Beat sync: snapping clip end {raw_tl_end:.2f}s -> beat {nearest_beat:.2f}s (dur {raw_duration:.2f}s -> {target_duration:.2f}s)")
+                    logger.info(f"Beat sync: snapping clip end {raw_tl_end:.2f}s -> beat {nearest_beat:.2f}s (dur {raw_duration:.2f}s -> {target_duration:.2f}s, tolerance: {tolerance}s)")
 
             accumulated_time += target_duration
 
@@ -306,129 +428,169 @@ class VideoEditor:
             source_filename = clip_name
 
             if ":" in clip_name:
-                parts = clip_name.split(":")
+                parts = clip_name.rsplit(":", 2)
                 if len(parts) == 3:
-                    source_filename = parts[0]
-                    virtual_start = float(parts[1])
-                    virtual_end = float(parts[2])
+                    try:
+                        v_start = float(parts[1])
+                        v_end = float(parts[2])
+                        source_filename = parts[0]
+                        virtual_start = v_start
+                        virtual_end = v_end
+                    except ValueError:
+                        pass
 
             clip_path = os.path.join(self.clips_dir, source_filename)
             if not os.path.exists(clip_path):
                 logger.warning(f"Clip not found, skipping: {clip_name}")
+                self.skipped_clips.append(clip_name)
                 continue
 
-            # 1. Load & trim from source — route images to ImageClip
-            ext = os.path.splitext(clip_path)[1].lower()
-            is_image = ext in self.IMAGE_EXTENSIONS
+            try:
+                # 1. Load & trim from source — route images to ImageClip
+                ext = os.path.splitext(clip_path)[1].lower()
+                is_image = ext in self.IMAGE_EXTENSIONS
 
-            if is_image:
-                # Images have no duration of their own. Use the calculated target_duration.
-                if target_duration <= 0:
-                    target_duration = 3.0  # fallback: 3 seconds for photos
-                    logger.warning(f"No valid duration for image '{clip_name}', defaulting to 3s")
-                raw = ImageClip(clip_path, duration=target_duration)
-                clip = raw
-                safe_end = target_duration  # used in logging below
-            else:
-                raw = VideoFileClip(clip_path)
-                if virtual_end is not None:
-                    actual_start = virtual_start + start_in
-                    actual_end = min(virtual_start + end_in, virtual_end, raw.duration)
-                    safe_end = min(actual_end, raw.duration)
-                    if safe_end <= actual_start:
-                        logger.warning(f"Invalid time range for virtual segment '{clip_name}', skipping")
-                        raw.close()
-                        continue
-                    clip = raw.subclipped(actual_start, safe_end)
+                if is_image:
+                    # Images have no duration of their own. Use the calculated target_duration.
+                    if target_duration <= 0:
+                        target_duration = 3.0  # fallback: 3 seconds for photos
+                        logger.warning(f"No valid duration for image '{clip_name}', defaulting to 3s")
+                    raw = ImageClip(clip_path, duration=target_duration)
+                    clip = raw
+                    safe_end = target_duration  # used in logging below
                 else:
-                    safe_end = min(end_in, raw.duration)
-                    if safe_end <= start_in:
-                        logger.warning(f"Invalid time range for '{clip_name}', skipping")
-                        raw.close()
-                        continue
-                    clip = raw.subclipped(start_in, safe_end)
+                    raw = VideoFileClip(clip_path)
+                    if virtual_end is not None:
+                        actual_start = virtual_start + start_in
+                        actual_end = min(virtual_start + end_in, virtual_end, raw.duration)
+                        safe_end = min(actual_end, raw.duration)
+                        if safe_end <= actual_start:
+                            logger.warning(f"Invalid time range for virtual segment '{clip_name}', skipping")
+                            raw.close()
+                            self.skipped_clips.append(clip_name)
+                            continue
+                        clip = raw.subclipped(actual_start, safe_end)
+                    else:
+                        safe_end = min(end_in, raw.duration)
+                        if safe_end <= start_in:
+                            logger.warning(f"Invalid time range for '{clip_name}', skipping")
+                            raw.close()
+                            self.skipped_clips.append(clip_name)
+                            continue
+                        clip = raw.subclipped(start_in, safe_end)
 
-            # 2. Resize and Center-Crop to dynamic aspect ratio
-            target_w, target_h = self.target_w, self.target_h
-            clip_w, clip_h = clip.size
-            
-            # Calculate scaling to fill target
-            scale = max(target_w / clip_w, target_h / clip_h)
-            new_w, new_h = int(clip_w * scale), int(clip_h * scale)
-            
-            # Resize
-            clip = clip.with_effects([Resize(width=new_w, height=new_h)])
-            
-            # Center crop
-            x1 = (new_w - target_w) // 2
-            y1 = (new_h - target_h) // 2
-            clip = clip.cropped(x1=x1, y1=y1, width=target_w, height=target_h)
+                # 1b. Silence Detection & Removal + Audio Level Normalization (non-images only)
+                if not is_image:
+                    clip = self._remove_silence(clip)
+                    clip = self._normalize_audio(clip)
 
-            # 3. Apply pacing style (speed multiplier — videos only)
-            if not is_image:
-                speed = self.PACING_SPEED.get(pacing, 1.0)
-                if speed != 1.0:
-                    clip = clip.with_effects([MultiplySpeed(speed)])
+                # 2. Resize and Center-Crop to dynamic aspect ratio
+                target_w, target_h = self.target_w, self.target_h
+                clip_w, clip_h = clip.size
+                
+                # Calculate scaling to fill target
+                scale = max(target_w / clip_w, target_h / clip_h)
+                new_w, new_h = int(clip_w * scale), int(clip_h * scale)
+                
+                # Resize
+                clip = clip.with_effects([Resize(width=new_w, height=new_h)])
+                
+                # Smart Face-Aware Cropping (only for videos, not images)
+                x1 = (new_w - target_w) // 2
+                y1 = (new_h - target_h) // 2
+                
+                if not is_image:
+                    try:
+                        middle_t = clip.duration / 2
+                        frame_rgb = clip.get_frame(middle_t)
+                        face_center = detect_face_center(frame_rgb)
+                        if face_center:
+                            face_x, face_y = face_center
+                            # Calculate anchor in the resized dimensions
+                            crop_center_x = face_x * new_w
+                            crop_center_y = face_y * new_h
+                            x1 = max(0, min(new_w - target_w, int(crop_center_x - target_w / 2)))
+                            y1 = max(0, min(new_h - target_h, int(crop_center_y - target_h / 2)))
+                            logger.info(f"Smart Cropping: Face detected at normalized center ({face_x:.2f}, {face_y:.2f}). Anchoring crop box to ({x1}, {y1}) instead of default center.")
+                    except Exception as e:
+                        logger.warning(f"Smart Face cropping failed, falling back to center-crop: {e}")
+                
+                clip = clip.cropped(x1=x1, y1=y1, width=target_w, height=target_h)
 
-            # 4. Match director-specified duration
-            # For videos: trim if over. For images: duration already set at load time.
-            if not is_image:
-                if target_duration > 0 and clip.duration > target_duration:
-                    clip = clip.subclipped(0, target_duration)
+                # 3. Apply pacing style (speed multiplier — videos only)
+                if not is_image:
+                    speed = self.PACING_SPEED.get(pacing, 1.0)
+                    if speed != 1.0:
+                        clip = clip.with_effects([MultiplySpeed(speed)])
 
-            # 4b. Apply Ken Burns effect to photos
-            # Direction alternates per clip to add visual variety:
-            # even-indexed clips zoom in, odd-indexed clips zoom out.
-            if is_image:
-                kb_direction = "in" if i % 2 == 0 else "out"
-                clip = self._apply_ken_burns(clip, direction=kb_direction)
+                # 4. Match director-specified duration
+                # For videos: trim if over. For images: duration already set at load time.
+                if not is_image:
+                    if target_duration > 0 and clip.duration > target_duration:
+                        clip = clip.subclipped(0, target_duration)
 
-            # 5. Duck original clip audio (only if background music is active)
-            if clip.audio is not None and music_path and os.path.exists(music_path):
-                # Only duck if there is actually audio in the clip and music is present
-                clip = clip.with_audio(
-                    clip.audio.with_effects([MultiplyVolume(self.ORIGINAL_AUDIO_VOLUME)])
+                # 4b. Apply Ken Burns effect to photos
+                # Direction alternates per clip to add visual variety:
+                # even-indexed clips zoom in, odd-indexed clips zoom out.
+                if is_image:
+                    kb_direction = "in" if i % 2 == 0 else "out"
+                    clip = self._apply_ken_burns(clip, direction=kb_direction)
+
+                # 5. Duck original clip audio (only if background music is active)
+                if clip.audio is not None and music_path and os.path.exists(music_path):
+                    # Only duck if there is actually audio in the clip and music is present
+                    clip = clip.with_audio(
+                        clip.audio.with_effects([MultiplyVolume(self.ORIGINAL_AUDIO_VOLUME)])
+                    )
+
+                # 6. Apply zoom transitions as clip-level effects (no overlap needed)
+                if transition == "zoom_in":
+                    clip = clip.with_effects([Resize(lambda t: 1 + 0.04 * t)])
+                elif transition == "zoom_out":
+                    clip = clip.with_effects([Resize(lambda t: max(0.1, 1.1 - 0.04 * t))])
+
+                # 7. Apply text overlay
+                text_overlay = item.get("text_overlay", "").strip()
+                if text_overlay:
+                    try:
+                        font_path = self._find_font()
+                        w, h = clip.size
+                        txt_clip = TextClip(
+                            text=text_overlay,
+                            font=font_path,
+                            font_size=70,
+                            color="white",
+                            stroke_color="black",
+                            stroke_width=2,
+                            method="caption",
+                            size=(int(w * 0.8), None),
+                        )
+                        txt_clip = (
+                            txt_clip
+                            .with_duration(clip.duration)
+                            .with_position(("center", int(h * 0.15)))  # Upper-third safe zone
+                        )
+                        clip = CompositeVideoClip([clip, txt_clip])
+                    except Exception as e:
+                        logger.warning(f"Could not apply text overlay '{text_overlay}': {e}")
+
+                processed_clips.append(clip)
+                transitions.append(transition)
+
+                media_type_label = "photo" if is_image else "video"
+                logger.info(
+                    f"[{i+1}/{len(timeline)}] [{media_type_label}] {clip_name} | "
+                    f"dur={clip.duration:.2f}s | transition={transition} | pacing={pacing}"
                 )
-
-            # 6. Apply zoom transitions as clip-level effects (no overlap needed)
-            if transition == "zoom_in":
-                clip = clip.with_effects([Resize(lambda t: 1 + 0.04 * t)])
-            elif transition == "zoom_out":
-                clip = clip.with_effects([Resize(lambda t: max(0.1, 1.1 - 0.04 * t))])
-
-            # 7. Apply text overlay
-            text_overlay = item.get("text_overlay", "").strip()
-            if text_overlay:
-                try:
-                    font_path = self._find_font()
-                    w, h = clip.size
-                    txt_clip = TextClip(
-                        text=text_overlay,
-                        font=font_path,
-                        font_size=70,
-                        color="white",
-                        stroke_color="black",
-                        stroke_width=2,
-                        method="caption",
-                        size=(int(w * 0.8), None),
-                    )
-                    txt_clip = (
-                        txt_clip
-                        .with_duration(clip.duration)
-                        .with_position(("center", int(h * 0.15)))  # Upper-third safe zone
-                    )
-                    clip = CompositeVideoClip([clip, txt_clip])
-                except Exception as e:
-                    logger.warning(f"Could not apply text overlay '{text_overlay}': {e}")
-
-            processed_clips.append(clip)
-            transitions.append(transition)
-
-            media_type_label = "photo" if is_image else "video"
-            logger.info(
-                f"[{i+1}/{len(timeline)}] [{media_type_label}] {clip_name} | "
-                f"dur={clip.duration:.2f}s | transition={transition} | pacing={pacing}"
-            )
+            except Exception as e:
+                logger.error(f"Failed to process clip {clip_name} at index {i}: {e}", exc_info=True)
+                self.skipped_clips.append(clip_name)
+                if 'raw' in locals() and raw:
+                    try:
+                        raw.close()
+                    except Exception:
+                        pass
+                continue
 
         if not processed_clips:
             raise RuntimeError("No valid clips were processed. Check clips directory and EDL.")
@@ -440,24 +602,39 @@ class VideoEditor:
             transitions=transitions,
         )
 
-        # Enforce exact target duration (truncate excess if LLM over-generated)
+        # Enforce exact target duration (trim or pad final video to hit the requested seconds)
         target_duration = float(edl.get("total_duration", 0.0))
-        if target_duration > 0 and final_video.duration > target_duration:
-            logger.info(f"Trimming final video: {final_video.duration:.2f}s -> target {target_duration:.2f}s")
-            final_video = final_video.subclipped(0, target_duration)
+        if target_duration > 0:
+            if final_video.duration > target_duration:
+                logger.info(f"Trimming final video: {final_video.duration:.2f}s -> target {target_duration:.2f}s")
+                final_video = final_video.subclipped(0, target_duration)
+            elif final_video.duration < target_duration:
+                padding_duration = target_duration - final_video.duration
+                logger.info(f"Padding final video: {final_video.duration:.2f}s -> target {target_duration:.2f}s (padding of {padding_duration:.2f}s)")
+                padding_clip = ColorClip(
+                    size=(self.target_w, self.target_h),
+                    color=(0, 0, 0),
+                    duration=padding_duration
+                )
+                final_video = CompositeVideoClip([
+                    final_video.with_start(0),
+                    padding_clip.with_start(final_video.duration)
+                ], size=(self.target_w, self.target_h))
 
         # 9. Mix background music
         if music_path and os.path.exists(music_path):
             logger.info(f"Mixing background music: {music_path}")
             music = AudioFileClip(music_path)
 
+            needed_duration = final_video.duration
             music_start = float(edl.get("music_start_offset", 0.0))
-            music_end = music_start + final_video.duration
 
-            if music_end > music.duration:
-                music_start = max(0, music.duration - final_video.duration)
-                music_end = music.duration
+            if music.duration < needed_duration + music_start:
+                repeats = int(np.ceil((needed_duration + music_start) / music.duration))
+                logger.info(f"Background music track is shorter than video duration ({music.duration:.2f}s < {needed_duration:.2f}s). Looping {repeats} times.")
+                music = concatenate_audioclips([music] * repeats)
 
+            music_end = music_start + needed_duration
             music = music.subclipped(music_start, music_end)
 
             # Professional music finishing

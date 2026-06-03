@@ -2,12 +2,25 @@ import os
 import logging
 import numpy as np
 from PIL import Image
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 from moviepy.video.io.VideoFileClip import VideoFileClip
 
 from backend_ai.core.config_loader import AGENTS_CONFIG
 
 logger = logging.getLogger("agents.project_analyst")
+
+
+def parse_virtual_segment(path: str) -> Optional[Tuple[str, float, float]]:
+    parts = path.rsplit(":", 2)
+    if len(parts) < 3:
+        return None
+    try:
+        start = float(parts[-2])
+        end = float(parts[-1])
+        return parts[0], start, end
+    except ValueError:
+        return None
+
 
 class ProjectAnalystAgent:
     """
@@ -37,18 +50,24 @@ class ProjectAnalystAgent:
         
         for path in video_paths:
             # 1. Validation Checks
-            if not os.path.exists(path):
-                logger.warning(f"File does not exist on disk: {path}")
+            parsed = parse_virtual_segment(path)
+            if parsed:
+                source_path, v_start, v_end = parsed
+            else:
+                source_path, v_start, v_end = path, None, None
+
+            if not os.path.exists(source_path):
+                logger.warning(f"File does not exist on disk: {source_path}")
                 rejected_files.append({"path": path, "reason": "file_not_found"})
                 continue
                 
-            file_size = os.path.getsize(path)
+            file_size = os.path.getsize(source_path)
             if file_size == 0:
-                logger.warning(f"File is empty (0 bytes): {path}")
+                logger.warning(f"File is empty (0 bytes): {source_path}")
                 rejected_files.append({"path": path, "reason": "empty_file"})
                 continue
                 
-            ext = os.path.splitext(path)[1].lower()
+            ext = os.path.splitext(source_path)[1].lower()
             
             # Classify media type
             if ext in self.SUPPORTED_VIDEO_EXTS:
@@ -56,7 +75,7 @@ class ProjectAnalystAgent:
             elif ext in self.SUPPORTED_PHOTO_EXTS:
                 media_type = "photo"
             else:
-                logger.warning(f"Unsupported file extension '{ext}': {path}")
+                logger.warning(f"Unsupported file extension '{ext}': {source_path}")
                 rejected_files.append({"path": path, "reason": "unsupported_extension"})
                 continue
 
@@ -64,8 +83,21 @@ class ProjectAnalystAgent:
             duration = 0.0
             if media_type == "video":
                 try:
-                    with VideoFileClip(path) as clip:
-                        duration = clip.duration
+                    if v_start is not None and v_end is not None:
+                        if v_start < 0 or v_end <= v_start:
+                            logger.warning(f"Invalid virtual segment bounds: {path}")
+                            rejected_files.append({"path": path, "reason": "invalid_virtual_segment"})
+                            continue
+
+                    with VideoFileClip(source_path) as clip:
+                        actual_duration = clip.duration
+
+                    if v_end is not None and v_end > actual_duration:
+                        logger.warning(f"Virtual segment end {v_end:.2f}s exceeds source duration {actual_duration:.2f}s: {path}")
+                        rejected_files.append({"path": path, "reason": "virtual_segment_out_of_bounds"})
+                        continue
+
+                    duration = (v_end - v_start) if v_start is not None else actual_duration
                     
                     if duration < self.min_video_duration:
                         logger.warning(f"Video clip too short ({duration:.2f}s, min={self.min_video_duration}s): {path}")
@@ -76,7 +108,7 @@ class ProjectAnalystAgent:
                         })
                         continue
                 except Exception as e:
-                    logger.warning(f"MoviePy could not read video duration for {path}: {e}")
+                    logger.warning(f"MoviePy could not read video duration for {source_path}: {e}")
                     rejected_files.append({"path": path, "reason": "unreadable_video"})
                     continue
 
@@ -87,11 +119,11 @@ class ProjectAnalystAgent:
             
             try:
                 if media_type == "video":
-                    quality_score, avg_sharpness, avg_brightness = self._score_video(path)
+                    quality_score, avg_sharpness, avg_brightness = self._score_video(source_path, v_start, v_end)
                 else:
-                    quality_score, avg_sharpness, avg_brightness = self._score_photo(path)
+                    quality_score, avg_sharpness, avg_brightness = self._score_photo(source_path)
             except Exception as e:
-                logger.warning(f"Quality scoring failed for {path}, assigning fallback 0.5: {e}")
+                logger.warning(f"Quality scoring failed for {source_path}, assigning fallback 0.5: {e}")
                 quality_score = 0.5
 
             valid_media.append({
@@ -124,7 +156,7 @@ class ProjectAnalystAgent:
             
         return report
 
-    def _score_video(self, path: str) -> Tuple[float, float, float]:
+    def _score_video(self, path: str, start: Optional[float] = None, end: Optional[float] = None) -> Tuple[float, float, float]:
         """
         Scores video quality by sampling frames and evaluating sharpness
         (Laplacian variance) and brightness balance.
@@ -135,7 +167,15 @@ class ProjectAnalystAgent:
         with VideoFileClip(path) as clip:
             duration = clip.duration
             # Compute sampling timestamps spaced evenly across video duration
-            timestamps = np.linspace(0.1, max(0.1, duration - 0.1), self.frame_sample_count)
+            t_start = start + 0.1 if start is not None else 0.1
+            t_end = end - 0.1 if end is not None else duration - 0.1
+            
+            if t_end < t_start:
+                # Fallback to the midpoint of the range if the subclip is very short
+                t_mid = (start + end) / 2 if (start is not None and end is not None) else duration / 2
+                timestamps = [t_mid] * self.frame_sample_count
+            else:
+                timestamps = np.linspace(t_start, t_end, self.frame_sample_count)
             
             for t in timestamps:
                 try:

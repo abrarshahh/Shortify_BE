@@ -20,11 +20,13 @@ def _target_duration_tolerance() -> float:
 
 
 def _parse_virtual_clip_name(clip_name: str) -> Optional[Tuple[str, float, float]]:
-    parts = clip_name.split(":")
-    if len(parts) != 3:
+    parts = clip_name.rsplit(":", 2)
+    if len(parts) < 3:
         return None
 
-    source_filename, start_str, end_str = parts
+    source_filename = parts[0]
+    start_str = parts[1]
+    end_str = parts[2]
     try:
         virtual_start = float(start_str)
         virtual_end = float(end_str)

@@ -138,7 +138,8 @@ def get_render_status(
         final_video_path=job.get("final_video_path"),
         safe_zone_verdict=job.get("safe_zone_verdict"),
         progress_percentage=job.get("progress_percentage", 0),
-        current_step=job.get("current_step", "Initializing...")
+        current_step=job.get("current_step", "Initializing..."),
+        skipped_clips=job.get("skipped_clips", [])
     )
 
 @router.get("/outputs", response_model=List[OutputVideoResponse])
