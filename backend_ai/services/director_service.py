@@ -1,6 +1,9 @@
 import os
 import json
 import logging
+import urllib.request
+import urllib.error
+import socket
 from typing import List, Dict, Any
 from groq import Groq
 from dotenv import load_dotenv
@@ -14,11 +17,140 @@ class CreativeDirector:
     def __init__(self):
         api_key = os.getenv("GROQ_API_KEY")
         if not api_key:
-            raise ValueError("GROQ_API_KEY not found in environment variables")
+            logger.warning("GROQ_API_KEY not found; Groq primary model will be skipped")
         
-        self.client = Groq(api_key=api_key)
         config = AGENTS_CONFIG.get("creative_director", {})
+        self.client = Groq(api_key=api_key) if api_key else None
         self.model_id = config.get("model", "llama-3.3-70b-versatile")
+        self.fallback_models = config.get("fallback_models", ["deepseek-r1:8b", "llama3.2-vision:latest"])
+        self.ollama_timeout_seconds = int(config.get("ollama_timeout_seconds", 60))
+
+    def _normalize_pacing_style(self, pacing_style: Any) -> str:
+        value = str(pacing_style or "jump-cut").strip().lower().replace("_", "-").replace(" ", "-")
+        aliases = {
+            "fast-cut": "jump-cut",
+            "fastcut": "jump-cut",
+            "speed-ramp": "speed-ramp",
+            "speedramp": "speed-ramp",
+            "cinematic-slow": "cinematic-slow",
+            "cinematicslow": "cinematic-slow",
+            "jump-cut": "jump-cut",
+            "jumpcut": "jump-cut",
+        }
+        return aliases.get(value, "jump-cut")
+
+    def _sanitize_edl(self, edl: Dict[str, Any]) -> Dict[str, Any]:
+        timeline = edl.get("timeline", [])
+        for item in timeline:
+            details = item.get("details") or {}
+            details["pacing_style"] = self._normalize_pacing_style(details.get("pacing_style"))
+            item["details"] = details
+        edl["timeline"] = timeline
+        return edl
+
+    def _build_heuristic_edl(
+        self,
+        user_prompt: str,
+        media_analyses: List[Dict[str, Any]],
+        target_duration: int,
+        style: str,
+    ) -> Dict[str, Any]:
+        """Deterministic fallback when all LLM calls fail or time out."""
+        clips: List[Dict[str, Any]] = []
+        for analysis in media_analyses:
+            metadata = analysis.get("file_metadata", {})
+            filename = metadata.get("filename")
+            if not filename:
+                continue
+            duration = metadata.get("duration_seconds")
+            clips.append({
+                "filename": filename,
+                "duration": float(duration) if duration else 3.0,
+                "summary": analysis.get("summary", ""),
+            })
+
+        if not clips:
+            raise RuntimeError("No usable clips available for heuristic EDL fallback")
+
+        total = float(target_duration)
+        timeline = []
+        cursor = 0.0
+        idx = 0
+        while cursor < total - 0.001:
+            clip = clips[idx % len(clips)]
+            remaining = total - cursor
+            segment_duration = min(max(0.5, min(4.0, clip["duration"])), remaining)
+
+            if segment_duration <= 0.5:
+                idx += 1
+                if idx >= len(clips) and cursor == 0.0:
+                    break
+                continue
+
+            timeline.append({
+                "clip_name": clip["filename"],
+                "start_in_clip": 0.0,
+                "end_in_clip": round(float(segment_duration), 3),
+                "timeline_start": round(float(cursor), 3),
+                "timeline_end": round(float(cursor + segment_duration), 3),
+                "transition": "jump_cut" if idx > 0 else "none",
+                "text_overlay": "",
+                "details": {
+                    "visual_cue": clip.get("summary") or "Key visual moment",
+                    "sound_design": "",
+                    "pacing_style": "jump-cut",
+                },
+            })
+            cursor += segment_duration
+            idx += 1
+
+        if not timeline:
+            raise RuntimeError("Heuristic EDL fallback could not build any timeline items")
+
+        return self._sanitize_edl({
+            "title": f"{style.title()} Reel",
+            "storyline": user_prompt[:120] or "A fast-cut highlight reel",
+            "total_duration": round(total, 3),
+            "music_start_offset": 0.0,
+            "timeline": timeline,
+        })
+
+    def _call_groq(self, messages: List[Dict[str, str]], model_id: str):
+        if not self.client:
+            raise RuntimeError("Groq client unavailable")
+        return self.client.chat.completions.create(
+            model=model_id,
+            messages=messages,
+            response_format={"type": "json_object"}
+        )
+
+    def _call_ollama(self, model_id: str, messages: List[Dict[str, str]]):
+        payload = {
+            "model": model_id,
+            "messages": messages,
+            "stream": False,
+            "format": "json",
+        }
+        req = urllib.request.Request(
+            "http://localhost:11434/api/chat",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.ollama_timeout_seconds) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError, socket.timeout) as e:
+            raise RuntimeError(f"Ollama unavailable for model '{model_id}': {e}") from e
+
+        if "message" not in body or "content" not in body["message"]:
+            raise RuntimeError(f"Unexpected Ollama response for model '{model_id}': {body}")
+
+        class _Response:
+            def __init__(self, content: str):
+                self.choices = [type("Choice", (), {"message": type("Message", (), {"content": content})()})()]
+
+        return _Response(body["message"]["content"])
 
     @rate_limit_guard(max_retries=5)
     def generate_edl(
@@ -93,10 +225,10 @@ class CreativeDirector:
               "timeline_end": float,
               "transition": "none | jump_cut | crossfade | dip_to_black | slide_left | slide_right | zoom_in | zoom_out | glitch",
               "text_overlay": "On-screen text (leave empty unless explicitly requested)",
-              "details": {{
+               "details": {{
                 "visual_cue": "Specific action to focus on",
                 "sound_design": "SFX (e.g., 'whoosh', 'bass drop')",
-                "pacing_style": "speed-ramp | jump-cut | cinematic-slow"
+                "pacing_style": "MUST be exactly one of: speed-ramp, jump-cut, cinematic-slow"
               }}
             }}
           ]
@@ -151,30 +283,42 @@ class CreativeDirector:
                 "content": f"CRITICAL REVISION DIRECTIVE:\nYour previous EDL generation failed rendering safety checks. Please correct this issue in your new EDL output:\n{feedback}"
             })
 
-        logger.info(f"CreativeDirector: Calling Groq model: {self.model_id}")
+        all_models = [self.model_id] + list(self.fallback_models)
+        logger.info(f"CreativeDirector: Model order: {all_models}")
         logger.debug(f"CreativeDirector (System Prompt):\n{system_prompt}")
         logger.debug(f"CreativeDirector (User Message):\n{user_message}")
 
-        import time
-        for attempt in range(3):
+        response = None
+        last_error = None
+
+        for model_id in all_models:
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model_id,
-                    messages=messages,
-                    response_format={"type": "json_object"}
-                )
+                if model_id == self.model_id:
+                    logger.info(f"CreativeDirector: Calling Groq model: {model_id}")
+                    response = self._call_groq(messages, model_id)
+                else:
+                    logger.info(
+                        f"CreativeDirector: Falling back to Ollama model: {model_id} "
+                        f"(timeout={self.ollama_timeout_seconds}s)"
+                    )
+                    response = self._call_ollama(model_id, messages)
                 break
             except Exception as e:
-                logger.warning(f"CreativeDirector: Groq API call failed (attempt {attempt + 1}/3): {e}")
-                if attempt < 2:
-                    time.sleep(2)
-                    continue
-                raise e
+                last_error = e
+                if "timed out" in str(e).lower() or isinstance(e, TimeoutError):
+                    logger.warning(f"CreativeDirector: Model '{model_id}' timed out after {self.ollama_timeout_seconds}s")
+                else:
+                    logger.warning(f"CreativeDirector: Model '{model_id}' failed: {e}")
+                continue
+
+        if response is None:
+            logger.warning(f"CreativeDirector: All models failed, using heuristic fallback EDL: {last_error}")
+            return self._build_heuristic_edl(user_prompt, media_analyses, target_duration, style)
 
         try:
             raw_content = response.choices[0].message.content
             logger.debug(f"CreativeDirector (Raw Output):\n{raw_content}")
-            edl = json.loads(raw_content)
+            edl = self._sanitize_edl(json.loads(raw_content))
             
             logger.info(
                 f"CreativeDirector: EDL successfully generated! "
