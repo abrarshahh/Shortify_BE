@@ -134,15 +134,21 @@ class VideoEditor:
                 next_duration = float(clip_durations[idx])
                 stage_path = os.path.join(temp_dir, f"stage_{idx:03d}.mp4")
 
+                # Load inputs and normalize timebase/fps to avoid xfade timebase mismatches
+                # Load raw inputs (video + audio)
                 current_input = ffmpeg.input(current_path)
                 next_input = ffmpeg.input(next_path)
+                # Normalize video streams to common fps and timebase for transitions
+                target_fps = 30
+                cur_video_norm = current_input.video.filter('fps', fps=target_fps).filter('settb', 'AVTB')
+                next_video_norm = next_input.video.filter('fps', fps=target_fps).filter('settb', 'AVTB')
 
                 if transition in transition_map:
                     fade_dur = min(self.DEFAULT_FADE_DURATION, current_duration / 2, next_duration / 2)
                     if fade_dur > 0:
                         offset = max(0.0, current_duration - fade_dur)
                         video_stream = ffmpeg.filter(
-                            [current_input.video, next_input.video],
+                            [cur_video_norm, next_video_norm],
                             "xfade",
                             transition=transition_map[transition],
                             duration=fade_dur,
