@@ -180,13 +180,18 @@ def _video_metadata(file_path: str) -> Dict[str, Any]:
         }
 
     try:
-        from moviepy import VideoFileClip
+        import cv2
 
-        with VideoFileClip(file_path) as clip:
-            width, height = clip.size
-            has_audio = clip.audio is not None
-            duration = clip.duration
-            fps = clip.fps
+        cap = cv2.VideoCapture(file_path)
+        if not cap.isOpened():
+            raise RuntimeError("Could not open video file via cv2")
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = float(cap.get(cv2.CAP_PROP_FPS))
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = frame_count / fps if fps > 0 else 0.0
+        cap.release()
+        has_audio = False
     except Exception:
         return {
             "filename": os.path.basename(file_path),

@@ -73,15 +73,22 @@ def test_validate_edl_checks_virtual_segments(tmp_path, monkeypatch):
     (clips_dir / "vlog.mp4").write_bytes(b"fake")
     (clips_dir / "clip-b.mp4").write_bytes(b"fake")
 
-    class FakeClip:
+    class FakeVideoCapture:
         def __init__(self, path):
-            self.path = path
-            self.duration = 20.0
-
-        def close(self):
+            pass
+        def isOpened(self):
+            return True
+        def get(self, prop):
+            import cv2
+            if prop == cv2.CAP_PROP_FPS:
+                return 30.0
+            if prop == cv2.CAP_PROP_FRAME_COUNT:
+                return 600.0
+            return 0.0
+        def release(self):
             pass
 
-    monkeypatch.setattr("backend_ai.services.edl_validation_service.VideoFileClip", FakeClip)
+    monkeypatch.setattr("cv2.VideoCapture", FakeVideoCapture)
 
     edl = _base_edl()
     edl["timeline"][0]["clip_name"] = "vlog.mp4:5.0:15.0"
@@ -96,14 +103,22 @@ def test_validate_edl_rejects_out_of_bounds_virtual_segment(tmp_path, monkeypatc
     (clips_dir / "vlog.mp4").write_bytes(b"fake")
     (clips_dir / "clip-b.mp4").write_bytes(b"fake")
 
-    class FakeClip:
+    class FakeVideoCapture:
         def __init__(self, path):
-            self.duration = 20.0
-
-        def close(self):
+            pass
+        def isOpened(self):
+            return True
+        def get(self, prop):
+            import cv2
+            if prop == cv2.CAP_PROP_FPS:
+                return 30.0
+            if prop == cv2.CAP_PROP_FRAME_COUNT:
+                return 600.0
+            return 0.0
+        def release(self):
             pass
 
-    monkeypatch.setattr("backend_ai.services.edl_validation_service.VideoFileClip", FakeClip)
+    monkeypatch.setattr("cv2.VideoCapture", FakeVideoCapture)
 
     edl = _base_edl()
     edl["timeline"][0]["clip_name"] = "vlog.mp4:5.0:25.0"
@@ -120,14 +135,22 @@ def test_validate_edl_rejects_target_duration_mismatch(tmp_path, monkeypatch):
     (clips_dir / "clip-a.mp4").write_bytes(b"fake")
     (clips_dir / "clip-b.mp4").write_bytes(b"fake")
 
-    class FakeClip:
+    class FakeVideoCapture:
         def __init__(self, path):
-            self.duration = 20.0
-
-        def close(self):
+            pass
+        def isOpened(self):
+            return True
+        def get(self, prop):
+            import cv2
+            if prop == cv2.CAP_PROP_FPS:
+                return 30.0
+            if prop == cv2.CAP_PROP_FRAME_COUNT:
+                return 600.0
+            return 0.0
+        def release(self):
             pass
 
-    monkeypatch.setattr("backend_ai.services.edl_validation_service.VideoFileClip", FakeClip)
+    monkeypatch.setattr("cv2.VideoCapture", FakeVideoCapture)
 
     edl = _base_edl()
     with pytest.raises(EDLValidationError) as exc_info:
@@ -145,14 +168,22 @@ def test_validate_edl_rejects_render_duration_mismatch(tmp_path, monkeypatch):
     (clips_dir / "clip-a.mp4").write_bytes(b"fake")
     (clips_dir / "clip-b.mp4").write_bytes(b"fake")
 
-    class FakeClip:
+    class FakeVideoCapture:
         def __init__(self, path):
-            self.duration = 20.0
-
-        def close(self):
+            pass
+        def isOpened(self):
+            return True
+        def get(self, prop):
+            import cv2
+            if prop == cv2.CAP_PROP_FPS:
+                return 30.0
+            if prop == cv2.CAP_PROP_FRAME_COUNT:
+                return 600.0
+            return 0.0
+        def release(self):
             pass
 
-    monkeypatch.setattr("backend_ai.services.edl_validation_service.VideoFileClip", FakeClip)
+    monkeypatch.setattr("cv2.VideoCapture", FakeVideoCapture)
 
     edl = _base_edl()
     edl["timeline"][0]["end_in_clip"] = 10.0

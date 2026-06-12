@@ -14,6 +14,7 @@ from backend_ai.services.subtitle_service import SubtitleAgent
 from backend_ai.services.color_service import ColorGradingAgent
 from backend_ai.services.analyst_service import ProjectAnalystAgent
 from backend_ai.services.thumbnail_service import ThumbnailAgent
+from backend_ai.services.clip_scoring_service import ClipScoringAgent
 from backend_ai.services.edl_validation_service import validate_edl
 from backend_ai.schemas.edl import EDLGenerationError, EDLValidationError
 from backend_ai.core.config_loader import AGENTS_CONFIG
@@ -50,6 +51,7 @@ class AgentState(TypedDict):
     max_edl_retries: int
     pre_flight_report: Dict[str, Any]
     progress_callback: Optional[Callable[[int, str], None]]
+    skipped_clips: Optional[List[str]]
 
 
 class ShortifyOrchestrator:
@@ -69,12 +71,14 @@ class ShortifyOrchestrator:
         self.color_grading_agent = ColorGradingAgent()
         self.analyst_agent = ProjectAnalystAgent()
         self.thumbnail_agent = ThumbnailAgent()
+        self.clip_scoring_agent = ClipScoringAgent()
         
         # Subtitle config
         sub_config = AGENTS_CONFIG.get("subtitle_agent", {})
         self.subtitle_agent = SubtitleAgent(
             model_size=sub_config.get("model_size", "base"),
-            device=sub_config.get("device", "cpu")
+            device=sub_config.get("device", "cpu"),
+            caption_style=sub_config.get("caption_style", "hormozi")
         )
         
         # Build and compile the graph
@@ -87,6 +91,7 @@ class ShortifyOrchestrator:
         workflow.add_node("analyze_rhythm", self.node_analyze_rhythm)
         workflow.add_node("pre_flight_check", self.node_pre_flight_check)
         workflow.add_node("analyze_media", self.node_analyze_media)
+        workflow.add_node("score_clips", self.node_score_clips)
         workflow.add_node("generate_edl", self.node_generate_edl)
         workflow.add_node("render_video", self.node_render_video)
         workflow.add_node("color_grade", self.node_color_grade)
@@ -97,7 +102,8 @@ class ShortifyOrchestrator:
         workflow.set_entry_point("pre_flight_check")
         workflow.add_edge("pre_flight_check", "analyze_rhythm")
         workflow.add_edge("analyze_rhythm", "analyze_media")
-        workflow.add_edge("analyze_media", "generate_edl")
+        workflow.add_edge("analyze_media", "score_clips")
+        workflow.add_edge("score_clips", "generate_edl")
         workflow.add_edge("generate_edl", "render_video")
         workflow.add_edge("render_video", "color_grade")
         workflow.add_edge("color_grade", "review_safety")
@@ -176,6 +182,15 @@ class ShortifyOrchestrator:
                 
         return {"visual_data": visual_data}
 
+    def node_score_clips(self, state: AgentState) -> Dict:
+        logger.info("NODE: score_clips")
+        callback = state.get("progress_callback")
+        if callback:
+            callback(58, "Scoring and ranking video segments locally...")
+            
+        visual_data = self.clip_scoring_agent.score_visual_data(state["visual_data"])
+        return {"visual_data": visual_data}
+
     def node_generate_edl(self, state: AgentState) -> Dict:
         logger.info("NODE: generate_edl")
         callback = state.get("progress_callback")
@@ -199,7 +214,8 @@ class ShortifyOrchestrator:
                 target_duration=state["target_duration"],
                 aspect_ratio=state["aspect_ratio"],
                 style=state["style"],
-                feedback=feedback
+                feedback=feedback,
+                pre_flight_report=state.get("pre_flight_report")
             )
 
             try:
@@ -250,7 +266,10 @@ class ShortifyOrchestrator:
             rhythm_data=state.get("rhythm_data", {})
         )
         
-        return {"rendered_video_path": rendered_path}
+        return {
+            "rendered_video_path": rendered_path,
+            "skipped_clips": getattr(editor, "skipped_clips", [])
+        }
 
     def node_color_grade(self, state: AgentState) -> Dict:
         logger.info("NODE: color_grade")
@@ -326,43 +345,43 @@ class ShortifyOrchestrator:
             logger.info("Subtitles not explicitly requested. Skipping transcription and burning.")
             import shutil
             shutil.copy(video_path, final_output)
-        # Generate cover thumbnail for opt-out subtitles
-        try:
-            overlay_text = None
-            if state["project_title"]:
-                words = state["project_title"].split()
-                overlay_text = " ".join(words[:4])
-            self.thumbnail_agent.generate_thumbnail(
-                video_path=final_output,
-                output_dir=self.exports_dir,
-                overlay_text=overlay_text
-            )
-        except Exception as e:
-            logger.warning(f"Cover thumbnail generation failed: {e}")
-
-        return {
-            "transcription": {},
-            "final_video_path": final_output
-        }
+            
+            try:
+                overlay_text = None
+                if state["project_title"]:
+                    words = state["project_title"].split()
+                    overlay_text = " ".join(words[:4])
+                self.thumbnail_agent.generate_thumbnail(
+                    video_path=final_output,
+                    output_dir=self.exports_dir,
+                    overlay_text=overlay_text
+                )
+            except Exception as e:
+                logger.warning(f"Cover thumbnail generation failed: {e}")
+                
+            return {
+                "transcription": {},
+                "final_video_path": final_output
+            }
 
         logger.info(f"Transcribing audio for {video_path}...")
         transcription = self.subtitle_agent.transcribe(video_path)
         
         if transcription["captions"]:
             logger.info(f"Burning subtitles to {final_output}...")
+            caption_style = getattr(self.subtitle_agent, "caption_style", "hormozi")
             final_video_path = self.subtitle_agent.burn_subtitles(
                 video_path=video_path,
                 captions=transcription["captions"],
-                output_path=final_output
+                output_path=final_output,
+                style=caption_style
             )
         else:
             logger.info("No spoken words detected. Subtitle burning skipped.")
-            # Still copy or rename to final output
             import shutil
             shutil.copy(video_path, final_output)
             final_video_path = final_output
             
-        # Generate cover thumbnail for opt-in subtitles
         try:
             overlay_text = None
             if transcription.get("captions"):

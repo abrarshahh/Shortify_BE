@@ -29,6 +29,7 @@ class EDLClipDetails(BaseModel):
     visual_cue: str
     sound_design: str
     pacing_style: PacingStyle
+    is_hook: bool = False
 
 
 class EDLTimelineItem(BaseModel):

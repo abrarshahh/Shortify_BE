@@ -2,7 +2,6 @@ import os
 import logging
 import numpy as np
 from PIL import Image, ImageEnhance, ImageDraw, ImageFont
-from moviepy.video.io.VideoFileClip import VideoFileClip
 from typing import Optional
 
 logger = logging.getLogger("agents.thumbnail")
@@ -37,13 +36,25 @@ class ThumbnailAgent:
         
         # 1. Extract frame at 1.0s (hook start)
         try:
-            with VideoFileClip(video_path) as clip:
-                duration = clip.duration
-                sample_t = min(1.0, max(0.0, duration - 0.1))
-                frame = clip.get_frame(sample_t)
-                img = Image.fromarray(frame)
+            import cv2
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                raise RuntimeError("Could not open video file via cv2")
+            fps = float(cap.get(cv2.CAP_PROP_FPS))
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            duration = frame_count / fps if fps > 0 else 0.0
+            
+            sample_t = min(1.0, max(0.0, duration - 0.1))
+            cap.set(cv2.CAP_PROP_POS_MSEC, sample_t * 1000.0)
+            success, frame_bgr = cap.read()
+            cap.release()
+            
+            if not success:
+                raise RuntimeError("Could not read frame from video via cv2")
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(frame_rgb)
         except Exception as e:
-            logger.warning(f"MoviePy frame extraction failed: {e}. Creating fallback gray thumbnail")
+            logger.warning(f"OpenCV frame extraction failed: {e}. Creating fallback gray thumbnail")
             img = Image.new("RGB", (1280, 720), color=(80, 80, 80))
 
         # 2. Apply high-contrast and saturation enhancements
