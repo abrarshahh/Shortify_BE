@@ -24,6 +24,7 @@ subtitle_agent:
   provider: "openai-whisper" # Local whisper
   model_size: "base"
   device: "cpu"
+  caption_style: "hormozi"
 
 project_analyst:
   provider: "local"
@@ -34,3 +35,10 @@ project_analyst:
 safety_reviewer:
   provider: "rule-based" # Local logic
   model: "safe-zone-v1"
+
+video_editor:
+  default_beat_snap_tolerance: 0.2
+  beat_snap_tolerances:
+    "speed-ramp": 0.1
+    "jump-cut": 0.2
+    "cinematic-slow": 0.3

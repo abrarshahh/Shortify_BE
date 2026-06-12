@@ -1,5 +1,5 @@
 import uuid
-from typing import Optional
+from typing import Optional, List
 from pydantic import BaseModel
 
 class OutputVideoResponse(BaseModel):
@@ -18,3 +18,4 @@ class RenderResponse(BaseModel):
     safe_zone_verdict: Optional[str] = None
     progress_percentage: Optional[int] = 0
     current_step: Optional[str] = "Initializing..."
+    skipped_clips: Optional[List[str]] = []

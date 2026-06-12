@@ -47,7 +47,6 @@ watchfiles==1.1.1
 websockets==15.0.1
 google-genai
 groq
-moviepy
 librosa
 langgraph
 openai-whisper
@@ -58,3 +57,5 @@ ffmpeg-python
 Pillow
 numpy
 argon2-cffi
+mediapipe
+opencv-python

@@ -1,7 +1,6 @@
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-from moviepy import VideoFileClip
 from pydantic import ValidationError
 
 from backend_ai.core.config import (
@@ -20,11 +19,13 @@ def _target_duration_tolerance() -> float:
 
 
 def _parse_virtual_clip_name(clip_name: str) -> Optional[Tuple[str, float, float]]:
-    parts = clip_name.split(":")
-    if len(parts) != 3:
+    parts = clip_name.rsplit(":", 2)
+    if len(parts) < 3:
         return None
 
-    source_filename, start_str, end_str = parts
+    source_filename = parts[0]
+    start_str = parts[1]
+    end_str = parts[2]
     try:
         virtual_start = float(start_str)
         virtual_end = float(end_str)
@@ -76,9 +77,22 @@ def _validate_clip_item(item: EDLTimelineItem, clips_dir: str, index: int) -> Li
         )
         return issues
 
-    clip = VideoFileClip(clip_path)
+    import cv2
+    cap = cv2.VideoCapture(clip_path)
     try:
-        duration = float(getattr(clip, "duration", 0.0) or 0.0)
+        if not cap.isOpened():
+            issues.append(
+                {
+                    "index": index,
+                    "clip_name": item.clip_name,
+                    "type": "unreadable_clip",
+                    "message": f"Could not open clip file: {item.clip_name}",
+                }
+            )
+            return issues
+        fps = float(cap.get(cv2.CAP_PROP_FPS))
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = frame_count / fps if fps > 0 else 0.0
         if virtual_end > duration:
             issues.append(
                 {
@@ -105,7 +119,7 @@ def _validate_clip_item(item: EDLTimelineItem, clips_dir: str, index: int) -> Li
                 }
             )
     finally:
-        clip.close()
+        cap.release()
 
     return issues
 
