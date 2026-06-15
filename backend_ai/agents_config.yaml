@@ -42,6 +42,9 @@ video_editor:
     "speed-ramp": 0.1
     "jump-cut": 0.2
     "cinematic-slow": 0.3
+  original_audio_volume: 1.0
+  music_volume: 0.22
+  music_ducked_volume: 0.06
 
 caption_styles:
   minimal:

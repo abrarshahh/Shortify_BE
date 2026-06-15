@@ -49,9 +49,10 @@ EDL_JSON_SCHEMA = {
                                 "type": "string",
                                 "enum": ["speed-ramp", "jump-cut", "cinematic-slow"]
                             },
-                            "is_hook": {"type": "boolean"}
+                            "is_hook": {"type": "boolean"},
+                            "keep_original_audio": {"type": "boolean"}
                         },
-                        "required": ["visual_cue", "sound_design", "pacing_style", "is_hook"],
+                        "required": ["visual_cue", "sound_design", "pacing_style", "is_hook", "keep_original_audio"],
                         "additionalProperties": False
                     }
                 },
@@ -153,6 +154,8 @@ class CreativeDirector:
                     "visual_cue": clip.get("summary") or "Key visual moment",
                     "sound_design": "",
                     "pacing_style": "jump-cut",
+                    "is_hook": False,
+                    "keep_original_audio": True,
                 },
             })
             cursor += segment_duration
@@ -337,11 +340,12 @@ class CreativeDirector:
               "timeline_end": float,
               "transition": "none | jump_cut | crossfade | dip_to_black | slide_left | slide_right | zoom_in | zoom_out | glitch",
               "text_overlay": "On-screen text (leave empty unless explicitly requested)",
-               "details": {{
+              "details": {{
                 "visual_cue": "Specific action to focus on",
                 "sound_design": "SFX (e.g., 'whoosh', 'bass drop')",
                 "pacing_style": "MUST be exactly one of: speed-ramp, jump-cut, cinematic-slow",
                 "is_hook": boolean,
+                "keep_original_audio": boolean
               }}
             }}
           ]
@@ -350,6 +354,7 @@ class CreativeDirector:
         RULES:
         - QUALITY PREFERENCE: Quality score is objective. Prefer clips with quality_score above 0.70 unless narrative requires otherwise. Never use clips with quality_score below 0.40 as the hook.
         - PACING CONSTRAINTS: Do not assign cinematic-slow pacing to high-motion clips (motion_tier == 'high'). Do not assign jump-cut pacing to static clips (motion_tier == 'static') unless the total reel style is speed-ramp or fast_cut.
+        - ORIGINAL AUDIO & DUCKING: Set 'keep_original_audio' to true if the clip contains dialogue, voices, or speaking parts that should be heard. This will play the clip's audio and duck the background music. Set it to false for clips that only contain background ambient noise, wind, silence, or where the raw audio is not useful. This will mute the clip's raw audio and keep the background music playing at full volume.
         - SEQUENTIAL ORDER: 'timeline_start' must strictly increase. No overlapping clips.
         - NO REPETITION: Avoid using the same clip twice in a row. Use different clips to maintain visual interest.
         - USER INTENT IS SUPREME: You MUST follow the User Intent perfectly. If the user asks for a specific scene, action, or chronological order, you must provide it exactly as requested, even if the priority_score is lower.
@@ -452,10 +457,13 @@ class CreativeDirector:
                         "sound_design": "beat",
                         "pacing_style": "jump-cut",
                         "is_hook": True,
+                        "keep_original_audio": True,
                     }
                 else:
                     first_item["details"]["is_hook"] = True
-                    logger.info("Hook enforcement: Programmatically forced first timeline item details.is_hook = True.")
+                    if "keep_original_audio" not in first_item["details"]:
+                        first_item["details"]["keep_original_audio"] = True
+                    logger.info("Hook enforcement: Programmatically forced first timeline item details.is_hook = True and keep_original_audio = True.")
 
         except Exception as e:
             logger.error(f"CreativeDirector: Error parsing response from Groq: {e}")

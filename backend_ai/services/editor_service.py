@@ -70,14 +70,16 @@ class VideoEditor:
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
 
-        self.DEFAULT_FADE_DURATION = VIDEO_EDITOR_DEFAULT_FADE_DURATION
-        self.ORIGINAL_AUDIO_VOLUME = VIDEO_EDITOR_ORIGINAL_AUDIO_VOLUME
-        self.MUSIC_VOLUME = VIDEO_EDITOR_MUSIC_VOLUME
+        # Load from config or fallback to defaults
+        editor_config = AGENTS_CONFIG.get("video_editor", {})
+        self.DEFAULT_FADE_DURATION = float(editor_config.get("default_fade_duration", VIDEO_EDITOR_DEFAULT_FADE_DURATION))
+        self.ORIGINAL_AUDIO_VOLUME = float(editor_config.get("original_audio_volume", 1.0))
+        self.MUSIC_VOLUME = float(editor_config.get("music_volume", 0.22))
+        self.MUSIC_DUCKED_VOLUME = float(editor_config.get("music_ducked_volume", 0.06))
         self.target_w = 1080
         self.target_h = 1920
 
         # Load video editor config for beat snapping tolerances
-        editor_config = AGENTS_CONFIG.get("video_editor", {})
         self.default_beat_snap_tolerance = float(editor_config.get("default_beat_snap_tolerance", 0.2))
         self.beat_snap_tolerances = editor_config.get("beat_snap_tolerances", {})
 
@@ -265,7 +267,8 @@ class VideoEditor:
         pacing: str,
         music_active: bool,
         temp_path: str,
-        face_anchor_x: float = 0.5
+        face_anchor_x: float = 0.5,
+        keep_original_audio: bool = True
     ) -> float:
         """
         Processes a single timeline item (trim, scale, crop, face-anchored, normalize, zoom, text-overlay)
@@ -313,7 +316,7 @@ class VideoEditor:
         orig_duration = frame_count / fps if fps > 0 else 0.0
         cap.release()
         
-        has_audio = self._check_has_audio(clip_path)
+        has_audio = self._check_has_audio(clip_path) and keep_original_audio
         
         # Silence detection
         intervals = []
@@ -466,10 +469,13 @@ class VideoEditor:
         self,
         clip_paths: list[str],
         clip_durations: list[float],
+        clip_has_audio: list[bool],
         transitions: list[str],
         output_path: str,
         music_path: Optional[str] = None,
         music_start_offset: float = 0.0,
+        tempo: float = 0.0,
+        style: str = "cinematic",
     ) -> None:
         """Assemble processed clips with FFmpeg's streaming filter graph."""
         if not clip_paths:
@@ -489,6 +495,24 @@ class VideoEditor:
         current_path = clip_paths[0]
         current_duration = float(clip_durations[0])
 
+        # Calculate beat-synchronized transition duration (Task 35)
+        if tempo and tempo > 0:
+            beat_duration = 60.0 / tempo
+            style_lower = style.lower() if style else ""
+            if any(s in style_lower for s in ["fast", "energy", "ramp", "action", "travel"]):
+                beat_fraction = 0.5
+            else:
+                beat_fraction = 1.0
+            sync_fade_duration = beat_duration * beat_fraction
+            # Clamp to a natural range
+            sync_fade_duration = max(0.1, min(1.0, sync_fade_duration))
+            logger.info(
+                f"Beat sync transition: tempo={tempo} BPM, beat_dur={beat_duration:.3f}s, "
+                f"fraction={beat_fraction}, sync_dur={sync_fade_duration:.3f}s"
+            )
+        else:
+            sync_fade_duration = self.DEFAULT_FADE_DURATION
+
         try:
             for idx in range(1, len(clip_paths)):
                 transition = (transitions[idx] or "none").lower()
@@ -503,7 +527,7 @@ class VideoEditor:
                 next_video_norm = next_input.video.filter('fps', fps=target_fps).filter('settb', 'AVTB')
 
                 if transition in transition_map:
-                    fade_dur = min(self.DEFAULT_FADE_DURATION, current_duration / 2, next_duration / 2)
+                    fade_dur = min(sync_fade_duration, current_duration / 2, next_duration / 2)
                     if fade_dur > 0:
                         offset = max(0.0, current_duration - fade_dur)
                         video_stream = ffmpeg.filter(
@@ -605,6 +629,28 @@ class VideoEditor:
                 "movflags": "+faststart",
             }
 
+            # Calculate dynamic audio ducking intervals (Task 34)
+            active_intervals = []
+            accumulated = 0.0
+            for idx in range(len(clip_paths)):
+                dur = clip_durations[idx]
+                has_aud = clip_has_audio[idx]
+                
+                # Check transition overlap for correct timing
+                transition_term = (transitions[idx] or "none").lower()
+                fade_overlap = 0.0
+                if idx > 0 and transition_term in transition_map:
+                    prev_dur = clip_durations[idx - 1]
+                    fade_overlap = min(sync_fade_duration, prev_dur / 2, dur / 2)
+                
+                if idx > 0:
+                    accumulated -= fade_overlap
+                    
+                if has_aud:
+                    active_intervals.append((accumulated, accumulated + dur))
+                    
+                accumulated += dur
+
             final_input = ffmpeg.input(current_path)
             if music_path and os.path.exists(music_path):
                 music_input = ffmpeg.input(music_path, stream_loop=-1)
@@ -613,7 +659,21 @@ class VideoEditor:
                     start=max(0.0, music_start_offset),
                     duration=current_duration,
                 ).filter("asetpts", "PTS-STARTPTS")
-                music_audio = music_audio.filter("volume", self.MUSIC_VOLUME)
+
+                # Apply dynamic audio ducking (Task 34)
+                if active_intervals:
+                    duck_conditions = []
+                    for start, end in active_intervals:
+                        duck_conditions.append(f"between(t,{start:.3f},{end:.3f})")
+                    cond_str = "+".join(duck_conditions)
+                    volume_expr = f"if({cond_str}, {self.MUSIC_DUCKED_VOLUME}, {self.MUSIC_VOLUME})"
+                    logger.info(f"Dynamic Audio Ducking active intervals count: {len(active_intervals)}")
+                    logger.debug(f"Volume filter expression: {volume_expr}")
+                else:
+                    volume_expr = f"{self.MUSIC_VOLUME}"
+                    logger.info("No active audio clips detected. Background music volume constant.")
+
+                music_audio = music_audio.filter("volume", volume_expr, eval="frame")
 
                 fade_out_start = max(0.0, current_duration - 1.5)
                 music_audio = music_audio.filter("afade", t="out", st=fade_out_start, d=1.5)
@@ -756,6 +816,7 @@ class VideoEditor:
         processed_temp_files = []
         processed_durations = []
         transitions = []
+        processed_has_audio = []
         temp_dir = tempfile.mkdtemp(prefix="video_editor_", dir=self.output_dir)
         
         beat_times = rhythm_data.get("beat_times", []) if rhythm_data else []
@@ -836,6 +897,9 @@ class VideoEditor:
                     if clip_scores and source_filename in clip_scores:
                         face_anchor_x = clip_scores[source_filename].get("face_anchor_x", 0.5)
 
+                    keep_aud = details.get("keep_original_audio", True)
+                    has_aud = (not is_image) and self._check_has_audio(clip_path) and keep_aud
+
                     processed_dur = self._process_single_clip(
                         clip_path=clip_path,
                         is_image=is_image,
@@ -847,12 +911,14 @@ class VideoEditor:
                         pacing=pacing,
                         music_active=bool(music_path and os.path.exists(music_path)),
                         temp_path=temp_clip_path,
-                        face_anchor_x=face_anchor_x
+                        face_anchor_x=face_anchor_x,
+                        keep_original_audio=keep_aud
                     )
                     
                     processed_temp_files.append(temp_clip_path)
                     processed_durations.append(processed_dur)
                     transitions.append(transition)
+                    processed_has_audio.append(has_aud)
 
                     media_type_label = "photo" if is_image else "video"
                     logger.info(
@@ -867,14 +933,16 @@ class VideoEditor:
             if not processed_temp_files:
                 raise RuntimeError("No valid clips were processed. Check clips directory and EDL.")
 
-            logger.info(f"Assembling {len(processed_temp_files)} clips with FFmpeg...")
             self._build_ffmpeg_concat(
                 clip_paths=processed_temp_files,
                 clip_durations=processed_durations,
+                clip_has_audio=processed_has_audio,
                 transitions=transitions,
                 output_path=output_path,
                 music_path=music_path,
                 music_start_offset=float(edl.get("music_start_offset", 0.0)),
+                tempo=rhythm_data.get("tempo", 0.0) if rhythm_data else 0.0,
+                style=edl.get("style", "cinematic"),
             )
 
             # Enforce exact target duration (trim/pad final video)

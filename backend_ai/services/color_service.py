@@ -134,6 +134,49 @@ class ColorGradingAgent:
         # Ensure LUTs directory exists
         self.luts_dir = os.path.abspath(os.path.join("data", "luts"))
         os.makedirs(self.luts_dir, exist_ok=True)
+        
+        self._generate_default_luts()
+
+    def _generate_default_luts(self):
+        cinematic_path = os.path.join(self.luts_dir, "cinematic.cube")
+        if not os.path.exists(cinematic_path):
+            logger.info("Generating default cinematic LUT file...")
+            content = (
+                "TITLE \"Cinematic Teal Orange\"\n"
+                "LUT_3D_SIZE 2\n"
+                "DOMAIN_MIN 0.0 0.0 0.0\n"
+                "DOMAIN_MAX 1.0 1.0 1.0\n"
+                "0.0 0.05 0.08\n"
+                "0.95 0.1 0.05\n"
+                "0.05 0.9 0.2\n"
+                "0.98 0.9 0.2\n"
+                "0.05 0.1 0.9\n"
+                "0.9 0.15 0.85\n"
+                "0.0 0.85 0.9\n"
+                "0.98 0.96 0.90\n"
+            )
+            with open(cinematic_path, "w") as f:
+                f.write(content)
+
+        vintage_path = os.path.join(self.luts_dir, "vintage.cube")
+        if not os.path.exists(vintage_path):
+            logger.info("Generating default vintage LUT file...")
+            content = (
+                "TITLE \"Vintage Faded Warm\"\n"
+                "LUT_3D_SIZE 2\n"
+                "DOMAIN_MIN 0.0 0.0 0.0\n"
+                "DOMAIN_MAX 1.0 1.0 1.0\n"
+                "0.08 0.08 0.08\n"
+                "0.85 0.15 0.15\n"
+                "0.15 0.8 0.2\n"
+                "0.9 0.85 0.3\n"
+                "0.15 0.2 0.8\n"
+                "0.8 0.2 0.75\n"
+                "0.15 0.75 0.8\n"
+                "0.92 0.9 0.85\n"
+            )
+            with open(vintage_path, "w") as f:
+                f.write(content)
 
     def _get_preset(self, style: str) -> Dict[str, float]:
         """

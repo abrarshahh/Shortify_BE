@@ -8,7 +8,7 @@ import numpy as np
 # Add project root to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from backend_ai.services.analyst_service import ProjectAnalystAgent, parse_virtual_segment
+from backend_ai.agents.project_analyst_agent import ProjectAnalystAgent, parse_virtual_segment
 from backend_ai.services.edl_validation_service import _parse_virtual_clip_name
 from backend_ai.services.editor_service import VideoEditor
 
@@ -343,9 +343,14 @@ def test_music_looping(tmp_path, monkeypatch):
     monkeypatch.setattr(VideoEditor, "_enforce_final_duration", lambda *args, **kwargs: None)
 
     captured_music = None
-    def mock_build_ffmpeg_concat(self, clip_paths, clip_durations, transitions, output_path, music_path, music_start_offset):
+    def mock_build_ffmpeg_concat(self, *args, **kwargs):
         nonlocal captured_music
-        captured_music = music_path
+        captured_music = kwargs.get("music_path")
+        if not captured_music:
+            for arg in args:
+                if isinstance(arg, str) and (arg.endswith(".wav") or arg.endswith(".mp3")):
+                    captured_music = arg
+                    break
 
     monkeypatch.setattr(VideoEditor, "_build_ffmpeg_concat", mock_build_ffmpeg_concat)
 
@@ -466,7 +471,7 @@ def test_configurable_beat_snap_tolerance(tmp_path, monkeypatch):
 
 def test_creative_director_drops_context(monkeypatch):
     import json
-    from backend_ai.services.director_service import CreativeDirector
+    from backend_ai.agents.director_agent import CreativeDirector
     
     # Mock GROQ_API_KEY env var
     monkeypatch.setenv("GROQ_API_KEY", "fake_key")
@@ -498,7 +503,7 @@ def test_creative_director_drops_context(monkeypatch):
         def __init__(self, api_key):
             self.chat = type("Chat", (), {"completions": MockCompletions()})()
 
-    monkeypatch.setattr("backend_ai.services.director_service.Groq", MockGroq)
+    monkeypatch.setattr("backend_ai.agents.director_agent.Groq", MockGroq)
 
     director = CreativeDirector()
     
@@ -531,7 +536,7 @@ def test_creative_director_drops_context(monkeypatch):
 def test_media_analyst_cache_ttl(tmp_path, monkeypatch):
     import time
     import json
-    from backend_ai.services.media_service import MediaAnalyst
+    from backend_ai.agents.media_agent import MediaAnalyst
     
     # Mock GEMINI_API_KEY
     monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
@@ -595,7 +600,7 @@ def test_media_analyst_cache_ttl(tmp_path, monkeypatch):
 
 def test_media_analyst_upload_retry(tmp_path, monkeypatch):
     import time
-    from backend_ai.services.media_service import MediaAnalyst
+    from backend_ai.agents.media_agent import MediaAnalyst
     monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
     
     src_file = tmp_path / "test_video.mp4"
@@ -639,7 +644,7 @@ def test_media_analyst_upload_retry(tmp_path, monkeypatch):
 
 def test_media_analyst_finally_cleanup(tmp_path, monkeypatch):
     import pytest
-    from backend_ai.services.media_service import MediaAnalyst
+    from backend_ai.agents.media_agent import MediaAnalyst
     monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
     
     src_file = tmp_path / "test_video.mp4"
@@ -679,7 +684,7 @@ def test_media_analyst_finally_cleanup(tmp_path, monkeypatch):
 
 
 def test_clip_scoring_agent(tmp_path, monkeypatch):
-    from backend_ai.services.clip_scoring_service import ClipScoringAgent
+    from backend_ai.agents.clip_scoring_agent import ClipScoringAgent
     
     video_file = tmp_path / "test_video.mp4"
     video_file.write_bytes(b"data")
@@ -705,14 +710,17 @@ def test_clip_scoring_agent(tmp_path, monkeypatch):
     import cv2
     monkeypatch.setattr(cv2, "VideoCapture", MockVideoCapture)
     
-    agent = ClipScoringAgent()
-    metrics = agent.score_video_segment(str(video_file), start=1.0, end=5.0)
+    # Mock MediaPipe face detection to avoid dependencies in test run
+    monkeypatch.setattr(ClipScoringAgent, "_detect_faces_mediapipe", lambda self, frame: (False, 0.5))
+    
+    agent = ClipScoringAgent(cache_dir=str(tmp_path / "cache"))
+    metrics = agent.score_file(str(video_file), style="cinematic")
     
     assert "sharpness" in metrics
     assert "motion_score" in metrics
-    assert metrics["motion_type"] == "static"
-    assert metrics["face_present"] is False
-    assert "local_score" in metrics
+    assert metrics["motion_tier"] == "static"
+    assert metrics["face_detected"] is False
+    assert "composite_score" in metrics
 
 
 def test_smart_face_cropping(tmp_path, monkeypatch):
@@ -759,7 +767,8 @@ def test_smart_face_cropping(tmp_path, monkeypatch):
     captured_cmd = []
     def mock_run(cmd, **kwargs):
         nonlocal captured_cmd
-        captured_cmd = cmd
+        if len(cmd) > 0 and "ffmpeg" in cmd[0]:
+            captured_cmd = cmd
         return subprocess.CompletedProcess(cmd, 0, "", "")
     monkeypatch.setattr(subprocess, "run", mock_run)
 
@@ -823,7 +832,7 @@ def test_orchestrator_clip_scoring(monkeypatch):
 
 def test_director_json_schema(monkeypatch):
     import json
-    from backend_ai.services.director_service import CreativeDirector
+    from backend_ai.agents.director_agent import CreativeDirector
     monkeypatch.setenv("GROQ_API_KEY", "fake_key")
     
     captured_kwargs = {}
@@ -848,7 +857,7 @@ def test_director_json_schema(monkeypatch):
         def __init__(self, api_key):
             self.chat = type("Chat", (), {"completions": MockCompletions()})()
 
-    monkeypatch.setattr("backend_ai.services.director_service.Groq", MockGroq)
+    monkeypatch.setattr("backend_ai.agents.director_agent.Groq", MockGroq)
     
     director = CreativeDirector()
     director.generate_edl(user_prompt="intent", audio_analysis={}, media_analyses=[], target_duration=10)
@@ -861,7 +870,7 @@ def test_director_json_schema(monkeypatch):
 
 def test_director_quality_scores_context(monkeypatch):
     import json
-    from backend_ai.services.director_service import CreativeDirector
+    from backend_ai.agents.director_agent import CreativeDirector
     monkeypatch.setenv("GROQ_API_KEY", "fake_key")
     
     captured_messages = []
@@ -886,7 +895,7 @@ def test_director_quality_scores_context(monkeypatch):
         def __init__(self, api_key):
             self.chat = type("Chat", (), {"completions": MockCompletions()})()
 
-    monkeypatch.setattr("backend_ai.services.director_service.Groq", MockGroq)
+    monkeypatch.setattr("backend_ai.agents.director_agent.Groq", MockGroq)
     
     director = CreativeDirector()
     
@@ -931,7 +940,7 @@ def test_director_quality_scores_context(monkeypatch):
 
 def test_director_hook_enforcement(monkeypatch):
     import json
-    from backend_ai.services.director_service import CreativeDirector
+    from backend_ai.agents.director_agent import CreativeDirector
     monkeypatch.setenv("GROQ_API_KEY", "fake_key")
     
     class MockCompletions:
@@ -970,7 +979,7 @@ def test_director_hook_enforcement(monkeypatch):
         def __init__(self, api_key):
             self.chat = type("Chat", (), {"completions": MockCompletions()})()
 
-    monkeypatch.setattr("backend_ai.services.director_service.Groq", MockGroq)
+    monkeypatch.setattr("backend_ai.agents.director_agent.Groq", MockGroq)
     
     director = CreativeDirector()
     edl = director.generate_edl(user_prompt="intent", audio_analysis={}, media_analyses=[], target_duration=10)
@@ -980,7 +989,7 @@ def test_director_hook_enforcement(monkeypatch):
 
 
 def test_subtitle_styles_drawtext(tmp_path, monkeypatch):
-    from backend_ai.services.subtitle_service import SubtitleAgent
+    from backend_ai.agents.subtitle_agent import SubtitleAgent
     
     written_filter_content = ""
     original_open = open
@@ -1079,7 +1088,7 @@ def test_subtitle_styles_drawtext(tmp_path, monkeypatch):
 
 
 def test_media_analyst_normalize_analysis_durations(monkeypatch):
-    from backend_ai.services.media_service import MediaAnalyst
+    from backend_ai.agents.media_agent import MediaAnalyst
     monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
     analyst = MediaAnalyst()
 

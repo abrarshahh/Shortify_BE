@@ -5,7 +5,7 @@ import sys
 # Add project root to sys.path to allow imports from backend_ai
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from backend_ai.services.director_service import CreativeDirector
+from backend_ai.agents.director_agent import CreativeDirector
 
 def test_director():
     print("--- Starting Creative Director (Groq) Test ---")

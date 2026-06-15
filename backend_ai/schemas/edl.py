@@ -30,6 +30,7 @@ class EDLClipDetails(BaseModel):
     sound_design: str
     pacing_style: PacingStyle
     is_hook: bool = False
+    keep_original_audio: bool = True
 
 
 class EDLTimelineItem(BaseModel):

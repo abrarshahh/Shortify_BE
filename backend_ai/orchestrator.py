@@ -7,13 +7,13 @@ from langgraph.graph import StateGraph, END
 
 # Import our agents
 from backend_ai.services.rhythm_service import RhythmEngineer
-from backend_ai.services.media_service import MediaAnalyst
-from backend_ai.services.director_service import CreativeDirector
+from backend_ai.agents.media_agent import MediaAnalyst
+from backend_ai.agents.director_agent import CreativeDirector
 from backend_ai.services.editor_service import VideoEditor
-from backend_ai.services.subtitle_service import SubtitleAgent
+from backend_ai.agents.subtitle_agent import SubtitleAgent
 from backend_ai.services.color_service import ColorGradingAgent
-from backend_ai.services.analyst_service import ProjectAnalystAgent
-from backend_ai.services.thumbnail_service import ThumbnailAgent
+from backend_ai.agents.project_analyst_agent import ProjectAnalystAgent
+from backend_ai.agents.thumbnail_agent import ThumbnailAgent
 from backend_ai.agents.clip_scoring_agent import ClipScoringAgent
 from backend_ai.services.edl_validation_service import validate_edl
 from backend_ai.schemas.edl import EDLGenerationError, EDLValidationError

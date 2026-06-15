@@ -5,7 +5,7 @@ import sys
 # Add project root to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from backend_ai.services.subtitle_service import SubtitleAgent
+from backend_ai.agents.subtitle_agent import SubtitleAgent
 
 RENDERED_VIDEO = "path/to/video.mp4"
 EDL_PATH       = "edl_output.json"

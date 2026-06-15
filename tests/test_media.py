@@ -5,9 +5,9 @@ import sys
 # Add project root to sys.path to allow imports from backend_ai
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from backend_ai.services.media_service import MediaAnalyst
+from backend_ai.agents.media_agent import MediaAnalyst
 
-def test_video_analysis(video_path):
+def run_video_analysis(video_path):
     if not os.path.exists(video_path):
         print(f"Error: File not found at {video_path}")
         return
@@ -38,4 +38,4 @@ def test_video_analysis(video_path):
 if __name__ == "__main__":
     # Pointing to the test file
     video_file = r"path/to/video.mp4"
-    test_video_analysis(video_file)
+    run_video_analysis(video_file)

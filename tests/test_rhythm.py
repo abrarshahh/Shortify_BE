@@ -3,7 +3,7 @@ import os
 import sys
 from backend_ai.services.rhythm_service import RhythmEngineer
 
-def test_audio_analysis(audio_path):
+def run_audio_analysis(audio_path):
     if not os.path.exists(audio_path):
         print(f"Error: File not found at {audio_path}")
         return
@@ -32,4 +32,4 @@ def test_audio_analysis(audio_path):
 if __name__ == "__main__":
     # Pointing to the test file
     audio_file = "path/to/music.mp3"
-    test_audio_analysis(audio_file)
+    run_audio_analysis(audio_file)
