@@ -108,6 +108,7 @@ def _execute_render_task(
             "max_edl_retries": 0,
             "pre_flight_report": {},
             "progress_callback": orchestrator_progress_callback,
+            "clip_scores": {},
         }
 
         # Instantiate orchestrator

@@ -149,7 +149,8 @@ class VideoEditor:
         target_w: int,
         target_h: int,
         direction: str = "in",
-        fps: int = 30
+        fps: int = 30,
+        face_anchor_x: float = 0.5
     ) -> None:
         """
         Generates a zoomed video from a static photo (Ken Burns effect) using Pillow.
@@ -189,7 +190,8 @@ class VideoEditor:
                 crop_w = int(target_w / (base_scale * current_zoom))
                 crop_h = int(target_h / (base_scale * current_zoom))
                 
-                cx = (orig_w - crop_w) // 2
+                cx = int(face_anchor_x * orig_w - crop_w / 2)
+                cx = max(0, min(orig_w - crop_w, cx))
                 cy = (orig_h - crop_h) // 2
                 
                 cropped = img.crop((cx, cy, cx + crop_w, cy + crop_h))
@@ -262,7 +264,8 @@ class VideoEditor:
         text_overlay: str,
         pacing: str,
         music_active: bool,
-        temp_path: str
+        temp_path: str,
+        face_anchor_x: float = 0.5
     ) -> float:
         """
         Processes a single timeline item (trim, scale, crop, face-anchored, normalize, zoom, text-overlay)
@@ -279,7 +282,8 @@ class VideoEditor:
                 duration=duration,
                 target_w=target_w,
                 target_h=target_h,
-                direction=kb_direction
+                direction=kb_direction,
+                face_anchor_x=face_anchor_x
             )
             
             # Add silent audio track for concatenation consistency
@@ -330,48 +334,65 @@ class VideoEditor:
         duck_gain = self.ORIGINAL_AUDIO_VOLUME if music_active else 1.0
         final_audio_gain = norm_gain * duck_gain
 
-        # Midpoint face detection and centering
-        mid_time = (start_in + end_in) / 2
-        frame_rgb = self._get_video_frame_at_time(clip_path, mid_time)
-        
+        # Horizontal crop centering using face_anchor_x (with Haar cascade fallback)
+        face_x = face_anchor_x
+        if face_anchor_x == 0.5:
+            mid_time = (start_in + end_in) / 2
+            frame_rgb = self._get_video_frame_at_time(clip_path, mid_time)
+            if frame_rgb is not None:
+                face_center = detect_face_center(frame_rgb)
+                if face_center:
+                    face_x = face_center[0]
+                    logger.info(f"Smart Cropping Fallback: Haar face detected at x={face_x:.2f}")
+
         scale = max(target_w / clip_w, target_h / clip_h)
         new_w, new_h = int(clip_w * scale), int(clip_h * scale)
         
-        x1 = (new_w - target_w) // 2
+        crop_center_x = face_x * new_w
+        x1 = max(0, min(new_w - target_w, int(crop_center_x - target_w / 2)))
         y1 = (new_h - target_h) // 2
         
-        if frame_rgb is not None:
-            face_center = detect_face_center(frame_rgb)
-            if face_center:
-                face_x, face_y = face_center
-                crop_center_x = face_x * new_w
-                crop_center_y = face_y * new_h
-                x1 = max(0, min(new_w - target_w, int(crop_center_x - target_w / 2)))
-                y1 = max(0, min(new_h - target_h, int(crop_center_y - target_h / 2)))
-                logger.info(f"Smart Cropping: Face detected at normalized center ({face_x:.2f}, {face_y:.2f}). Anchoring crop box to ({x1}, {y1}).")
+        logger.info(f"Smart Cropping: Using anchor x={face_x:.2f}. Anchoring crop box horizontally to {x1}.")
 
         # Build FFmpeg filters
         filter_complex_parts = []
         video_output_names = []
         audio_output_names = []
         
+        speed = self.PACING_SPEED.get(pacing, 1.0)
+        if speed <= 0:
+            speed = 1.0
+            
         for idx, (s, e) in enumerate(intervals):
             v_name = f"v{idx}"
             a_name = f"a{idx}"
             
-            filter_complex_parts.append(
-                f"[0:v]trim=start={s}:end={e},setpts=PTS-STARTPTS,scale={new_w}:{new_h},crop={target_w}:{target_h}:{x1}:{y1}[{v_name}]"
-            )
-            
-            if has_audio:
+            if speed != 1.0:
                 filter_complex_parts.append(
-                    f"[0:a]atrim=start={s}:end={e},asetpts=PTS-STARTPTS[{a_name}]"
+                    f"[0:v]trim=start={s}:end={e},setpts=(PTS-STARTPTS)/{speed:.2f},scale={new_w}:{new_h},crop={target_w}:{target_h}:{x1}:{y1}[{v_name}]"
                 )
+                if has_audio:
+                    filter_complex_parts.append(
+                        f"[0:a]atrim=start={s}:end={e},asetpts=PTS-STARTPTS,atempo={speed:.2f}[{a_name}]"
+                    )
+                else:
+                    dur = (e - s) / speed
+                    filter_complex_parts.append(
+                        f"aevalsrc=0:d={dur:.3f},asetpts=PTS-STARTPTS[{a_name}]"
+                    )
             else:
-                dur = e - s
                 filter_complex_parts.append(
-                    f"aevalsrc=0:d={dur},asetpts=PTS-STARTPTS[{a_name}]"
+                    f"[0:v]trim=start={s}:end={e},setpts=PTS-STARTPTS,scale={new_w}:{new_h},crop={target_w}:{target_h}:{x1}:{y1}[{v_name}]"
                 )
+                if has_audio:
+                    filter_complex_parts.append(
+                        f"[0:a]atrim=start={s}:end={e},asetpts=PTS-STARTPTS[{a_name}]"
+                    )
+                else:
+                    dur = e - s
+                    filter_complex_parts.append(
+                        f"aevalsrc=0:d={dur},asetpts=PTS-STARTPTS[{a_name}]"
+                    )
                 
             video_output_names.append(f"[{v_name}]")
             audio_output_names.append(f"[{a_name}]")
@@ -416,7 +437,7 @@ class VideoEditor:
         
         filter_complex_str = ";".join(filter_complex_parts)
         
-        total_intervals_duration = sum(e - s for s, e in intervals)
+        total_intervals_duration = sum(e - s for s, e in intervals) / speed
         output_duration = target_duration if (target_duration > 0 and target_duration < total_intervals_duration) else total_intervals_duration
         
         cmd = [
@@ -706,7 +727,8 @@ class VideoEditor:
         music_path: Optional[str] = None,
         output_filename: str = "shortify_output.mp4",
         aspect_ratio: str = "9:16",
-        rhythm_data: Optional[Dict[str, Any]] = None
+        rhythm_data: Optional[Dict[str, Any]] = None,
+        clip_scores: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Renders the final video from an EDL produced by CreativeDirector.
@@ -809,6 +831,11 @@ class VideoEditor:
                 
                 try:
                     logger.info(f"Processing clip: {clip_name} -> {temp_clip_path}")
+                    
+                    face_anchor_x = 0.5
+                    if clip_scores and source_filename in clip_scores:
+                        face_anchor_x = clip_scores[source_filename].get("face_anchor_x", 0.5)
+
                     processed_dur = self._process_single_clip(
                         clip_path=clip_path,
                         is_image=is_image,
@@ -819,7 +846,8 @@ class VideoEditor:
                         text_overlay=item.get("text_overlay", "").strip(),
                         pacing=pacing,
                         music_active=bool(music_path and os.path.exists(music_path)),
-                        temp_path=temp_clip_path
+                        temp_path=temp_clip_path,
+                        face_anchor_x=face_anchor_x
                     )
                     
                     processed_temp_files.append(temp_clip_path)

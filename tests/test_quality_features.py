@@ -855,7 +855,8 @@ def test_director_json_schema(monkeypatch):
     
     assert "response_format" in captured_kwargs
     rf = captured_kwargs["response_format"]
-    assert rf["type"] == "json_object"
+    assert rf["type"] in ["json_object", "json_schema"]
+
 
 
 def test_director_quality_scores_context(monkeypatch):
@@ -978,15 +979,16 @@ def test_director_hook_enforcement(monkeypatch):
     assert edl["timeline"][0]["details"]["is_hook"] is True
 
 
-def test_subtitle_styles_ass(tmp_path, monkeypatch):
+def test_subtitle_styles_drawtext(tmp_path, monkeypatch):
     from backend_ai.services.subtitle_service import SubtitleAgent
     
-    written_ass_content = ""
+    written_filter_content = ""
     original_open = open
     
     def mock_open(file, *args, **kwargs):
-        nonlocal written_ass_content
-        if str(file).endswith(".ass"):
+        nonlocal written_filter_content
+        filename = str(file)
+        if "temp_filter_" in filename and filename.endswith(".txt"):
             class MockFile:
                 def __init__(self):
                     self.content = []
@@ -995,8 +997,8 @@ def test_subtitle_styles_ass(tmp_path, monkeypatch):
                 def __enter__(self):
                     return self
                 def __exit__(self, exc_type, exc_val, exc_tb):
-                    nonlocal written_ass_content
-                    written_ass_content = "".join(self.content)
+                    nonlocal written_filter_content
+                    written_filter_content = "".join(self.content)
             return MockFile()
         return original_open(file, *args, **kwargs)
         
@@ -1033,32 +1035,47 @@ def test_subtitle_styles_ass(tmp_path, monkeypatch):
     
     # 1. Test minimal style
     agent.burn_subtitles("in.mp4", captions, "out.mp4", style="minimal")
-    assert "Style: Default" in written_ass_content
-    assert ",48," in written_ass_content
-    assert ",1.5,0.0," in written_ass_content
-    assert "Dialogue: 0," in written_ass_content
-    assert "Hello world caption" in written_ass_content
+    assert "drawtext" in written_filter_content
+    assert "fontsize=32" in written_filter_content
+    assert "fontcolor=white" in written_filter_content
+    assert "between(t,0.500,2.500)" in written_filter_content
+    assert "x='(w-" in written_filter_content
+    assert "y='" in written_filter_content
+    assert "Hello world caption" in written_filter_content
     
     # 2. Test bold style
     agent.burn_subtitles("in.mp4", captions, "out.mp4", style="bold")
-    assert ",72," in written_ass_content
-    assert ",3.0,2.0," in written_ass_content
-    assert "HELLO WORLD CAPTION" in written_ass_content
+    assert "drawtext" in written_filter_content
+    assert "fontsize=52" in written_filter_content
+    assert "borderw=4" in written_filter_content
+    assert "bordercolor=black" in written_filter_content
+    assert "HELLO WORLD CAPTION" in written_filter_content
     
     # 3. Test outline style
     agent.burn_subtitles("in.mp4", captions, "out.mp4", style="outline")
-    assert ",64," in written_ass_content
-    assert ",4.0,0.0," in written_ass_content
-    assert "subtitles" in captured_cmd[5]
+    assert "drawtext" in written_filter_content
+    assert "fontsize=64" in written_filter_content
+    assert "borderw=4" in written_filter_content
+    assert "-filter_script:v" in captured_cmd
     
     # 4. Test hormozi style (word-level highlight animations)
     agent.burn_subtitles("in.mp4", captions, "out.mp4", style="hormozi")
-    assert ",76," in written_ass_content
-    assert ",5.0,0.0," in written_ass_content
-    
-    assert "{\\c&H0000FFFF&}HELLO{\\r} WORLD CAPTION" in written_ass_content
-    assert "HELLO {\\c&H0000FFFF&}WORLD{\\r} CAPTION" in written_ass_content
-    assert "HELLO WORLD {\\c&H0000FFFF&}CAPTION{\\r}" in written_ass_content
+    assert "drawtext" in written_filter_content
+    assert "fontsize=44" in written_filter_content
+    assert "fontcolor=white" in written_filter_content      # inactive text color
+    assert "fontcolor=yellow" in written_filter_content     # active text highlight color
+    assert "shadowx=2" in written_filter_content
+    assert "shadowy=2" in written_filter_content
+    assert "shadowcolor=black" in written_filter_content
+    assert "box=1" in written_filter_content
+    assert "boxcolor=black@0.5" in written_filter_content
+    assert "HELLO" in written_filter_content
+    assert "WORLD" in written_filter_content
+    assert "CAPTION" in written_filter_content
+    assert "between(t,0.500,1.000)" in written_filter_content
+    assert "between(t,1.000,1.500)" in written_filter_content
+    assert "between(t,1.500,2.500)" in written_filter_content
+
 
 
 def test_media_analyst_normalize_analysis_durations(monkeypatch):

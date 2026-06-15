@@ -42,3 +42,42 @@ video_editor:
     "speed-ramp": 0.1
     "jump-cut": 0.2
     "cinematic-slow": 0.3
+
+caption_styles:
+  minimal:
+    font_size: 32
+    font_color: "white"
+    outline_color: "none"
+    back_color: "none"
+    position_y_ratio: 0.85
+    uppercase: false
+    animate: false
+  bold:
+    font_size: 52
+    font_color: "white"
+    outline_color: "black"
+    outline_width: 4
+    back_color: "none"
+    position_y_ratio: 0.80
+    uppercase: true
+    animate: false
+  hormozi:
+    font_size: 44
+    font_color: "yellow"
+    inactive_color: "white"
+    outline_color: "none"
+    back_color: "black@0.5"
+    shadow_color: "black"
+    shadow_width: 2
+    position_y_ratio: 0.80
+    uppercase: true
+    animate: true
+  subtitle:
+    font_size: 28
+    font_color: "white"
+    outline_color: "none"
+    back_color: "black"
+    position_y_ratio: 0.90
+    uppercase: false
+    animate: false
+
