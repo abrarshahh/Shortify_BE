@@ -14,6 +14,59 @@ from backend_ai.schemas.edl import EDLDocument
 load_dotenv()
 logger = logging.getLogger("agents.director")
 
+EDL_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "storyline": {"type": "string"},
+        "total_duration": {"type": "number", "minimum": 0.1},
+        "music_start_offset": {"type": "number", "minimum": 0.0},
+        "timeline": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "clip_name": {"type": "string"},
+                    "start_in_clip": {"type": "number", "minimum": 0.0},
+                    "end_in_clip": {"type": "number", "minimum": 0.0},
+                    "timeline_start": {"type": "number", "minimum": 0.0},
+                    "timeline_end": {"type": "number", "minimum": 0.0},
+                    "transition": {
+                        "type": "string",
+                        "enum": [
+                            "none", "jump_cut", "crossfade", "dip_to_black",
+                            "slide_left", "slide_right", "zoom_in", "zoom_out", "glitch"
+                        ]
+                    },
+                    "text_overlay": {"type": "string"},
+                    "details": {
+                        "type": "object",
+                        "properties": {
+                            "visual_cue": {"type": "string"},
+                            "sound_design": {"type": "string"},
+                            "pacing_style": {
+                                "type": "string",
+                                "enum": ["speed-ramp", "jump-cut", "cinematic-slow"]
+                            },
+                            "is_hook": {"type": "boolean"}
+                        },
+                        "required": ["visual_cue", "sound_design", "pacing_style", "is_hook"],
+                        "additionalProperties": False
+                    }
+                },
+                "required": [
+                    "clip_name", "start_in_clip", "end_in_clip",
+                    "timeline_start", "timeline_end", "transition", "text_overlay", "details"
+                ],
+                "additionalProperties": False
+            }
+        }
+    },
+    "required": ["title", "storyline", "total_duration", "music_start_offset", "timeline"],
+    "additionalProperties": False
+}
+
 class CreativeDirector:
     def __init__(self):
         api_key = os.getenv("GROQ_API_KEY")
@@ -116,9 +169,25 @@ class CreativeDirector:
             "timeline": timeline,
         })
 
-    def _call_groq(self, messages: List[Dict[str, str]], model_id: str):
+    def _call_groq(self, messages: List[Dict[str, str]], model_id: str, use_schema: bool = True):
         if not self.client:
             raise RuntimeError("Groq client unavailable")
+        if use_schema:
+            try:
+                return self.client.chat.completions.create(
+                    model=model_id,
+                    messages=messages,
+                    response_format={
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": "edl_document",
+                            "schema": EDL_JSON_SCHEMA
+                        }
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"CreativeDirector: Groq model '{model_id}' failed with json_schema: {e}. Falling back to json_object.")
+        
         return self.client.chat.completions.create(
             model=model_id,
             messages=messages,
@@ -163,7 +232,8 @@ class CreativeDirector:
         aspect_ratio: str = "9:16",
         style: str = "cinematic",
         feedback: str = None,
-        pre_flight_report: Optional[Dict[str, Any]] = None
+        pre_flight_report: Optional[Dict[str, Any]] = None,
+        clip_scores: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Generates an Edit Decision List (EDL) by reasoning over audio beats and visual content.
@@ -218,12 +288,20 @@ class CreativeDirector:
                 "avg_sharpness": 100.0,
                 "avg_brightness": 128.0
             })
+            
+            cs_info = {}
+            if clip_scores and filename in clip_scores:
+                cs_info = clip_scores[filename]
+                
             clip_info = {
                 "filename": filename,
                 "duration": analysis.get("file_metadata", {}).get("duration_seconds"),
-                "quality_score": q_info["quality_score"],
-                "avg_sharpness": q_info["avg_sharpness"],
-                "avg_brightness": q_info["avg_brightness"],
+                "quality_score": cs_info.get("composite_score", q_info["quality_score"]),
+                "avg_sharpness": cs_info.get("sharpness", q_info["avg_sharpness"]),
+                "avg_brightness": cs_info.get("exposure_score", q_info["avg_brightness"]),
+                "motion_score": cs_info.get("motion_score", 0.0),
+                "motion_tier": cs_info.get("motion_tier", "medium"),
+                "face_detected": cs_info.get("face_detected", False),
                 "summary": analysis.get("summary"),
                 "highlights": analysis.get("interesting_segments", []),
                 "segments": analysis.get("all_segments", [])
@@ -270,16 +348,18 @@ class CreativeDirector:
         }}
         
         RULES:
+        - QUALITY PREFERENCE: Quality score is objective. Prefer clips with quality_score above 0.70 unless narrative requires otherwise. Never use clips with quality_score below 0.40 as the hook.
+        - PACING CONSTRAINTS: Do not assign cinematic-slow pacing to high-motion clips (motion_tier == 'high'). Do not assign jump-cut pacing to static clips (motion_tier == 'static') unless the total reel style is speed-ramp or fast_cut.
         - SEQUENTIAL ORDER: 'timeline_start' must strictly increase. No overlapping clips.
         - NO REPETITION: Avoid using the same clip twice in a row. Use different clips to maintain visual interest.
         - USER INTENT IS SUPREME: You MUST follow the User Intent perfectly. If the user asks for a specific scene, action, or chronological order, you must provide it exactly as requested, even if the priority_score is lower.
         - SMART CLIP SELECTION (STRICT CASCADE LOGIC): You MUST select clips using this exact priority sequence:
           1. FIRST, only look at segments from the 'highlights' array.
           2. FILTER by 'should_be_used': prioritize segments where 'should_be_used' is true, and further prioritize segments with higher 'local_score' (scored by our local ClipScoringAgent).
-          3. MATCH PACING STYLE: You MUST match the 'pacing_style' under 'details' based on the clip segment's 'motion_type' metric. High-motion segments ('motion_type' == 'high-motion') MUST be assigned to 'speed-ramp' pacing; static segments ('motion_type' == 'static') MUST be assigned to 'cinematic-slow' pacing.
+          3. MATCH PACING STYLE: You MUST match the 'pacing_style' under 'details' based on the clip segment's 'motion_type' metric. High-motion segments ('motion_type' == 'high-motion' or motion_tier == 'high') MUST be assigned to 'speed-ramp' pacing; static segments ('motion_type' == 'static' or motion_tier == 'static') MUST be assigned to 'cinematic-slow' pacing.
           4. MATCH FOCUS: Ensure that the 'segment_focus' is consistent across the selected clips (e.g., if the main theme is 'mountain', try to pick other 'mountain' clips).
           5. If you still need more duration to hit the target, fall back to the 'segments' array and apply the exact same logic (highest priority_score, should_be_used: true, matching focus).
-        - EXACT DURATION REQUIRED: You MUST calculate the total video length. The sum of all clip durations ('end_in_clip' - 'start_in_clip') MUST EXACTLY equal {target_duration} seconds.
+        - EXACT DURATION REQUIRED: The total expected render duration (sum of effective clip durations) MUST equal {target_duration} seconds. For each clip, its effective duration is: (end_in_clip - start_in_clip) / 1.5 if details.pacing_style is 'speed-ramp', and (end_in_clip - start_in_clip) otherwise. The sum of these effective durations must be exactly {target_duration} seconds.
         - DURATION MATCH: Ensure 'timeline_end - timeline_start' is exactly equal to 'end_in_clip - start_in_clip' for each clip.
         - MUSIC SELECTION: Use 'music_start_offset' to pick a good starting point from the audio track (e.g., an energy segment).
         - TEXT OVERLAYS: Only provide a 'text_overlay' if the user explicitly requests on-screen text, captions, or subtitles. Otherwise, it MUST be an empty string ("").

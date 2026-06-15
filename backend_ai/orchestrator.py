@@ -14,7 +14,7 @@ from backend_ai.services.subtitle_service import SubtitleAgent
 from backend_ai.services.color_service import ColorGradingAgent
 from backend_ai.services.analyst_service import ProjectAnalystAgent
 from backend_ai.services.thumbnail_service import ThumbnailAgent
-from backend_ai.services.clip_scoring_service import ClipScoringAgent
+from backend_ai.agents.clip_scoring_agent import ClipScoringAgent
 from backend_ai.services.edl_validation_service import validate_edl
 from backend_ai.schemas.edl import EDLGenerationError, EDLValidationError
 from backend_ai.core.config_loader import AGENTS_CONFIG
@@ -52,6 +52,7 @@ class AgentState(TypedDict):
     pre_flight_report: Dict[str, Any]
     progress_callback: Optional[Callable[[int, str], None]]
     skipped_clips: Optional[List[str]]
+    clip_scores: Optional[Dict[str, Any]]
 
 
 class ShortifyOrchestrator:
@@ -100,10 +101,10 @@ class ShortifyOrchestrator:
 
         # Set edges
         workflow.set_entry_point("pre_flight_check")
-        workflow.add_edge("pre_flight_check", "analyze_rhythm")
+        workflow.add_edge("pre_flight_check", "score_clips")
+        workflow.add_edge("score_clips", "analyze_rhythm")
         workflow.add_edge("analyze_rhythm", "analyze_media")
-        workflow.add_edge("analyze_media", "score_clips")
-        workflow.add_edge("score_clips", "generate_edl")
+        workflow.add_edge("analyze_media", "generate_edl")
         workflow.add_edge("generate_edl", "render_video")
         workflow.add_edge("render_video", "color_grade")
         workflow.add_edge("color_grade", "review_safety")
@@ -159,7 +160,7 @@ class ShortifyOrchestrator:
             return {"rhythm_data": {}}
         
         logger.info(f"Analyzing beats for: {music_path}")
-        rhythm_data = self.rhythm_agent.analyze_music(music_path)
+        rhythm_data = self.rhythm_agent.analyze_music(music_path, clip_scores=state.get("clip_scores"))
         return {"rhythm_data": rhythm_data}
 
     def node_analyze_media(self, state: AgentState) -> Dict:
@@ -188,8 +189,20 @@ class ShortifyOrchestrator:
         if callback:
             callback(58, "Scoring and ranking video segments locally...")
             
-        visual_data = self.clip_scoring_agent.score_visual_data(state["visual_data"])
-        return {"visual_data": visual_data}
+        clip_scores = self.clip_scoring_agent.score_all_clips(
+            video_paths=state["video_paths"],
+            style=state.get("style", "cinematic")
+        )
+        
+        # For backward compatibility, also scoring visual_data if it exists (e.g. during retries/custom flows)
+        visual_data = state.get("visual_data", [])
+        if visual_data:
+            visual_data = self.clip_scoring_agent.score_visual_data(visual_data)
+            
+        return {
+            "clip_scores": clip_scores,
+            "visual_data": visual_data
+        }
 
     def node_generate_edl(self, state: AgentState) -> Dict:
         logger.info("NODE: generate_edl")
@@ -215,13 +228,26 @@ class ShortifyOrchestrator:
                 aspect_ratio=state["aspect_ratio"],
                 style=state["style"],
                 feedback=feedback,
-                pre_flight_report=state.get("pre_flight_report")
+                pre_flight_report=state.get("pre_flight_report"),
+                clip_scores=state.get("clip_scores")
             )
 
             try:
                 validated_edl = validate_edl(edl, clips_dir, target_duration=float(state["target_duration"]))
+                edl_dict = validated_edl.model_dump(mode="json")
+                
+                # Apply hook corrections (Task 30)
+                corrected_edl = self._apply_hook_corrections(
+                    edl=edl_dict,
+                    clip_scores=state.get("clip_scores"),
+                    clips_dir=clips_dir
+                )
+                
+                # Re-validate corrected EDL to ensure continuity & matching durations
+                validated_corrected_edl = validate_edl(corrected_edl, clips_dir, target_duration=float(state["target_duration"]))
+                
                 return {
-                    "edl": validated_edl.model_dump(mode="json"),
+                    "edl": validated_corrected_edl.model_dump(mode="json"),
                     "edl_feedback": "",
                     "max_edl_retries": max_edl_retries,
                 }
@@ -263,7 +289,8 @@ class ShortifyOrchestrator:
             music_path=state.get("music_path"),
             output_filename=output_filename,
             aspect_ratio=state.get("aspect_ratio", "9:16"),
-            rhythm_data=state.get("rhythm_data", {})
+            rhythm_data=state.get("rhythm_data", {}),
+            clip_scores=state.get("clip_scores")
         )
         
         return {
@@ -423,4 +450,110 @@ class ShortifyOrchestrator:
         logger.info("=== SHORTIFY PIPELINE COMPLETE ===")
         logger.info(f"Final Video: {final_state.get('final_video_path')}")
         return final_state
+
+    def _apply_hook_corrections(
+        self,
+        edl: Dict[str, Any],
+        clip_scores: Optional[Dict[str, Any]],
+        clips_dir: str
+    ) -> Dict[str, Any]:
+        """
+        Task 30: Post-processes the validated EDL.
+        Checks hook position, hook duration, and applies hook quality gate.
+        """
+        timeline = edl.get("timeline", [])
+        if not timeline:
+            return edl
+
+        # Helper to recalculate timeline_start and timeline_end
+        def recalculate_timeline_times(items: List[Dict[str, Any]]):
+            cursor = 0.0
+            for item in items:
+                dur = float(item["end_in_clip"]) - float(item["start_in_clip"])
+                item["timeline_start"] = round(cursor, 3)
+                item["timeline_end"] = round(cursor + dur, 3)
+                cursor += dur
+
+        # Helper to extract basename from virtual clip name
+        def get_base_filename(clip_name: str) -> str:
+            source = clip_name
+            if ":" in clip_name:
+                parts = clip_name.split(":", 2)
+                if len(parts) == 3:
+                    source = parts[0]
+            return os.path.basename(source)
+
+        # 1. Hook Position Correction
+        # Find index of the hook segment
+        hook_idx = -1
+        for idx, item in enumerate(timeline):
+            if item.get("details", {}).get("is_hook", False):
+                hook_idx = idx
+                break
+
+        # If no hook found, force the first item to be the hook
+        if hook_idx == -1:
+            logger.info("Hook post-processing: No hook found in timeline. Forcing timeline[0] to be hook.")
+            timeline[0]["details"]["is_hook"] = True
+            hook_idx = 0
+
+        # If hook is not at index 0, swap it to index 0
+        if hook_idx > 0:
+            logger.info(f"Hook post-processing: Moving hook from position {hook_idx} to position 0.")
+            # Swap items in list
+            temp = timeline[0]
+            timeline[0] = timeline[hook_idx]
+            timeline[hook_idx] = temp
+            
+            # Update detail flags
+            timeline[0]["details"]["is_hook"] = True
+            timeline[hook_idx]["details"]["is_hook"] = False
+            
+            recalculate_timeline_times(timeline)
+
+        # 2. Hook Quality Gate Correction
+        if clip_scores:
+            hook_item = timeline[0]
+            hook_base = get_base_filename(hook_item["clip_name"])
+            hook_score = clip_scores.get(hook_base, {}).get("composite_score", 0.5)
+
+            if hook_score < 0.5:
+                # Scan the first 4 segments (index 0 to 3) for a higher quality clip
+                best_candidate_idx = -1
+                best_candidate_score = hook_score
+
+                for idx in range(1, min(4, len(timeline))):
+                    cand_base = get_base_filename(timeline[idx]["clip_name"])
+                    cand_score = clip_scores.get(cand_base, {}).get("composite_score", 0.5)
+                    if cand_score > best_candidate_score:
+                        best_candidate_score = cand_score
+                        best_candidate_idx = idx
+
+                if best_candidate_idx != -1:
+                    logger.info(
+                        f"Hook post-processing: Swapping low-quality hook ({hook_score:.2f}) "
+                        f"with higher-quality candidate ({best_candidate_score:.2f}) at index {best_candidate_idx}."
+                    )
+                    # Swap items
+                    temp = timeline[0]
+                    timeline[0] = timeline[best_candidate_idx]
+                    timeline[best_candidate_idx] = temp
+                    
+                    # Update detail flags
+                    timeline[0]["details"]["is_hook"] = True
+                    timeline[best_candidate_idx]["details"]["is_hook"] = False
+                    
+                    recalculate_timeline_times(timeline)
+
+        # 3. Hook Duration Correction
+        hook_item = timeline[0]
+        hook_dur = float(hook_item["end_in_clip"]) - float(hook_item["start_in_clip"])
+        if hook_dur > 3.5:
+            logger.info(f"Hook post-processing: Trimming hook duration from {hook_dur:.2f}s to 3.5s.")
+            # Adjust duration
+            hook_item["end_in_clip"] = round(float(hook_item["start_in_clip"]) + 3.5, 3)
+            # Recalculate
+            recalculate_timeline_times(timeline)
+
+        return edl
 

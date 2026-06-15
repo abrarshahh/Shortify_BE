@@ -3,7 +3,7 @@ import numpy as np
 import json
 import os
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger("agents.rhythm")
 
@@ -11,7 +11,7 @@ class RhythmEngineer:
     def __init__(self):
         pass
 
-    def analyze_music(self, file_path: str) -> Dict[str, Any]:
+    def analyze_music(self, file_path: str, clip_scores: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Analyzes a music file to detect beats, tempo, and high-energy segments.
         """
@@ -55,6 +55,50 @@ class RhythmEngineer:
         # 4. Sentiment Analysis
         sentiment = self._estimate_sentiment(y, sr, float(tempo))
 
+        # 5. Optional Clip Ordering Suggestions based on motion tiers
+        suggested_ordering = {}
+        if clip_scores:
+            high_clips = []
+            med_clips = []
+            static_clips = []
+            for fname, metrics in clip_scores.items():
+                tier = metrics.get("motion_tier", "medium")
+                score = metrics.get("composite_score", 0.5)
+                item = {"clip_name": fname, "score": score}
+                if tier == "high":
+                    high_clips.append(item)
+                elif tier == "static":
+                    static_clips.append(item)
+                else:
+                    med_clips.append(item)
+            
+            # Sort by score descending
+            high_clips.sort(key=lambda x: x["score"], reverse=True)
+            med_clips.sort(key=lambda x: x["score"], reverse=True)
+            static_clips.sort(key=lambda x: x["score"], reverse=True)
+
+            high_placements = []
+            for idx, drop_t in enumerate(peak_times.tolist()):
+                if idx < len(high_clips):
+                    high_placements.append({
+                        "clip_name": high_clips[idx]["clip_name"],
+                        "suggested_at_seconds": round(float(drop_t), 2)
+                    })
+                else:
+                    # Fallback to medium clips if we run out of high-motion clips
+                    med_idx = idx - len(high_clips)
+                    if med_idx < len(med_clips):
+                        high_placements.append({
+                            "clip_name": med_clips[med_idx]["clip_name"],
+                            "suggested_at_seconds": round(float(drop_t), 2)
+                        })
+
+            suggested_ordering = {
+                "high_motion_placements": high_placements,
+                "static_clips_for_builds": [c["clip_name"] for c in static_clips],
+                "medium_motion_filler": [c["clip_name"] for c in med_clips]
+            }
+
         result = {
             "tempo": float(tempo),
             "beat_count": len(beat_times),
@@ -63,7 +107,8 @@ class RhythmEngineer:
             "energy_segments": energy_segments,
             "duration": float(librosa.get_duration(y=y, sr=sr)),
             "sentiment": sentiment,
-            "segment_sentiments": self._get_segment_sentiments(y, sr, float(tempo))
+            "segment_sentiments": self._get_segment_sentiments(y, sr, float(tempo)),
+            "suggested_clip_ordering": suggested_ordering
         }
 
         logger.info(
