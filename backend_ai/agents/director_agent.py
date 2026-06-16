@@ -166,6 +166,10 @@ class CreativeDirector:
                     "pacing_style": "jump-cut",
                     "is_hook": False,
                     "keep_original_audio": True,
+                    "effect_type": "none",
+                    "effect_query": "",
+                    "sticker_query": "",
+                    "sticker_position": "bottom-center"
                 },
             })
             cursor += segment_duration
@@ -349,7 +353,7 @@ class CreativeDirector:
               "timeline_start": float,
               "timeline_end": float,
               "transition": "none | jump_cut | crossfade | dip_to_black | slide_left | slide_right | zoom_in | zoom_out | glitch",
-              "text_overlay": "On-screen text (leave empty unless explicitly requested)",
+                "text_overlay": "On-screen text (decide dynamically based on user prompt/style; leave empty if not appropriate)",
               "details": {{
                 "visual_cue": "Specific action to focus on",
                 "sound_design": "SFX (e.g., 'whoosh', 'bass drop')",
@@ -357,8 +361,8 @@ class CreativeDirector:
                 "is_hook": boolean,
                 "keep_original_audio": boolean,
                 "effect_type": "none | particles | overlay_blend | light_leak | smoke",
-                "effect_query": "specific search query (like 'lens flare', 'bokeh', 'smoke', 'fog', or empty string)",
-                "sticker_query": "specific search query for Giphy (like 'subscribe', 'fire', 'arrow', or empty string)",
+                "effect_query": "specific search query (decide dynamically based on user prompt/style, like 'lens flare', 'bokeh', 'smoke', 'fog', or empty string)",
+                "sticker_query": "specific search query for Giphy (decide dynamically based on user prompt/style, like 'subscribe', 'fire', 'arrow', or empty string)",
                 "sticker_position": "center | top-left | top-right | bottom-left | bottom-right | bottom-center"
               }}
             }}
@@ -381,10 +385,11 @@ class CreativeDirector:
         - EXACT DURATION REQUIRED: The total expected render duration (sum of effective clip durations) MUST equal {target_duration} seconds. For each clip, its effective duration is: (end_in_clip - start_in_clip) / 1.5 if details.pacing_style is 'speed-ramp', and (end_in_clip - start_in_clip) otherwise. The sum of these effective durations must be exactly {target_duration} seconds.
         - DURATION MATCH: Ensure 'timeline_end - timeline_start' is exactly equal to 'end_in_clip - start_in_clip' for each clip.
         - MUSIC SELECTION: Use 'music_start_offset' to pick a good starting point from the audio track (e.g., an energy segment).
-        - TEXT OVERLAYS: You, as the viral video analyst, must decide which key moments or scene transitions would benefit from on-screen text overlays (title cards, main hooks, call-to-actions, or section headers). For each timeline clip, determine if a short, punchy text overlay (1-4 words) fits the scene, and if so, write it in the 'text_overlay' field. Do not include subtitles of dialogue here (subtitles are processed separately). Use text overlays strategically to capture and keep viewer attention.
-        - STICKERS & VISUAL EFFECTS: Determine if a clip would benefit from a visual effect loop (smoke, particles, fog, light leak) or an animated transparent sticker:
-          - If a sticker is useful (e.g. arrows to draw focus, subscribe button, expressions like 'fire', 'wow', 'laugh'), set 'sticker_query' to a 1-2 word query and pick its spatial 'sticker_position'.
-          - If a clip needs an aesthetic layer (like floating dust, sparks, light leaks, bokeh, fog, smoke), set 'effect_type' and provide a search term in 'effect_query'.
+        - DYNAMIC ELEMENTS & STYLES SELECTION: You MUST select and tailor transitions, pacing_style, text_overlay, effect_type, effect_query, sticker_query, and sticker_position dynamically based on the user's prompt and intention. Do not use generic defaults if the prompt indicates a specific vibe (e.g. if they ask for a 'scary video', use 'smoke'/'fog' effects, 'ghost'/'scared' stickers, and glitch/dip_to_black transitions; if a 'hype/gym video', use 'particles'/'sparks' effects, 'fire'/'subscribe' stickers, and fast_cut/speed-ramp pacing).
+        - TEXT OVERLAYS: You, as the viral video analyst, must decide which key moments or scene transitions would benefit from on-screen text overlays (title cards, main hooks, call-to-actions, or section headers) based on the user's prompt theme. For each timeline clip, determine if a short, punchy text overlay (1-4 words) fits the scene, and if so, write it in the 'text_overlay' field. Do not include subtitles of dialogue here (subtitles are processed separately). Use text overlays strategically to capture and keep viewer attention.
+        - STICKERS & VISUAL EFFECTS: Determine if a clip would benefit from a visual effect loop or an animated transparent sticker based on the user's prompt and theme:
+          - If a sticker is useful (e.g. arrows to draw focus, subscribe button, expressions like 'fire', 'wow', 'laugh'), set 'sticker_query' to a 1-2 word query reflecting the user's prompt theme and pick its spatial 'sticker_position'.
+          - If a clip needs an aesthetic layer (like floating dust, sparks, light leaks, bokeh, fog, smoke), set 'effect_type' and provide a search term in 'effect_query' reflecting the user's prompt theme.
           - Set 'effect_type' to 'none' and leave queries empty ("") if they are not needed for a clip.
         - TRANSITIONS: Choose transitions deliberately based on style and narrative moment:
           - 'none' or 'jump_cut': default for fast_cut style, high energy sequences, beat-sync cuts. Never use crossfade on beat-sync cuts.

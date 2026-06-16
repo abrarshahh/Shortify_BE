@@ -585,6 +585,7 @@ def test_dynamic_aesthetic_styling_generation(monkeypatch):
     class MockChatCompletionChoiceMessage:
         content = """
         {
+          "requires_subtitles": true,
           "subtitle_style": {
             "font_name": "Special Aardvark",
             "font_size": 48,
@@ -643,6 +644,7 @@ def test_dynamic_aesthetic_styling_generation(monkeypatch):
         video_style="cinematic"
     )
     
+    assert style["requires_subtitles"] is True
     assert style["subtitle_style"]["font_name"] == "Special Aardvark"
     assert style["subtitle_style"]["font_size"] == 48
     assert style["subtitle_style"]["font_color"] == "cyan"
@@ -913,4 +915,80 @@ def test_dynamic_stickers_and_effects(monkeypatch):
     # 3. Assert sticker sizing and top-right positioning filters are mapped
     assert "[2:v]scale=324:-1" in filter_complex_arg
     assert "overlay=x='W-w-50':y='120'" in filter_complex_arg
+
+
+def test_orchestrator_dynamic_subtitle_requires_logic(monkeypatch):
+    from backend_ai.orchestrator import ShortifyOrchestrator
+    
+    orchestrator = ShortifyOrchestrator()
+    
+    # Mock subtitle_agent.transcribe and burn_subtitles and os.path.exists and shutil.copy
+    monkeypatch.setattr(orchestrator.subtitle_agent, "transcribe", lambda path: {"captions": [{"text": "Hello", "start": 0.0, "end": 1.0}]})
+    
+    burn_called_with = None
+    def mock_burn_subtitles(video_path, captions, output_path, style):
+        nonlocal burn_called_with
+        burn_called_with = (video_path, captions, output_path, style)
+        return output_path
+        
+    monkeypatch.setattr(orchestrator.subtitle_agent, "burn_subtitles", mock_burn_subtitles)
+    
+    # Mock shutil.copy and thumbnail_agent.generate_thumbnail
+    monkeypatch.setattr("shutil.copy", lambda src, dst: dst)
+    monkeypatch.setattr(orchestrator.thumbnail_agent, "generate_thumbnail", lambda **kwargs: None)
+    monkeypatch.setattr("os.path.exists", lambda path: True)
+    
+    # Scenario 1: Agent decided requires_subtitles = True, even if prompt has no keyword
+    state_agent_true = {
+        "video_paths": ["dummy.mp4"],
+        "music_path": None,
+        "project_title": "Silent Vlog of Mountains",
+        "output_filename": "final.mp4",
+        "target_duration": 10,
+        "aspect_ratio": "9:16",
+        "style": "cinematic",
+        "color_graded_path": "graded.mp4",
+        "rendered_video_path": "render.mp4",
+        "dynamic_style": {"requires_subtitles": True, "subtitle_style": {}}
+    }
+    
+    res = orchestrator.node_burn_subtitles(state_agent_true)
+    assert burn_called_with is not None
+    assert res["final_video_path"] == os.path.join(orchestrator.exports_dir, "final.mp4")
+    
+    burn_called_with = None
+    
+    # Scenario 2: Agent decided requires_subtitles = False, even if prompt has subtitle keyword
+    state_agent_false = {
+        "video_paths": ["dummy.mp4"],
+        "music_path": None,
+        "project_title": "My subtitle project",
+        "output_filename": "final.mp4",
+        "target_duration": 10,
+        "aspect_ratio": "9:16",
+        "style": "cinematic",
+        "color_graded_path": "graded.mp4",
+        "rendered_video_path": "render.mp4",
+        "dynamic_style": {"requires_subtitles": False, "subtitle_style": {}}
+    }
+    
+    res = orchestrator.node_burn_subtitles(state_agent_false)
+    assert burn_called_with is None
+    
+    # Scenario 3: Fallback logic check - no dynamic style exists, prompt has subtitle keyword
+    state_fallback_true = {
+        "video_paths": ["dummy.mp4"],
+        "music_path": None,
+        "project_title": "My subtitle project",
+        "output_filename": "final.mp4",
+        "target_duration": 10,
+        "aspect_ratio": "9:16",
+        "style": "cinematic",
+        "color_graded_path": "graded.mp4",
+        "rendered_video_path": "render.mp4",
+        "dynamic_style": None
+    }
+    res = orchestrator.node_burn_subtitles(state_fallback_true)
+    assert burn_called_with is not None
+
 

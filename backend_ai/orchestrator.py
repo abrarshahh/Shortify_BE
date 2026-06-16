@@ -407,8 +407,15 @@ class ShortifyOrchestrator:
         if callback:
             callback(98, "Burning dynamic subtitles...")
             
-        prompt_lower = state["project_title"].lower()
-        requires_subtitles = any(k in prompt_lower for k in ["subtitle", "caption", "text"])
+        dynamic_style = state.get("dynamic_style")
+        requires_subtitles = False
+        if dynamic_style and "requires_subtitles" in dynamic_style:
+            requires_subtitles = bool(dynamic_style["requires_subtitles"])
+            logger.info(f"Agent dynamically decided requires_subtitles = {requires_subtitles}")
+        else:
+            prompt_lower = state["project_title"].lower()
+            requires_subtitles = any(k in prompt_lower for k in ["subtitle", "caption", "text", "sub"])
+            logger.info(f"Fallback logic decided requires_subtitles = {requires_subtitles} (prompt: '{state['project_title']}')")
         
         video_path = state.get("color_graded_path") or state["rendered_video_path"]
         final_output = os.path.join(self.exports_dir, state["output_filename"])
