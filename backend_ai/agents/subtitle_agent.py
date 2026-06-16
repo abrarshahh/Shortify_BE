@@ -130,12 +130,9 @@ class SubtitleAgent:
         from PIL import ImageFont
         from backend_ai.core.config_loader import AGENTS_CONFIG
 
-        style_name = style if style else getattr(self, "caption_style", "hormozi")
-        logger.info(f"burn_subtitles: Using style '{style_name}'")
+        # Resolve style name and details later
 
-        # 1. Determine font file path
-        font_path = self._find_font()
-        font_path_escaped = font_path.replace('\\', '/').replace(':', '\\:')
+        # Fallback styles
 
         # Fallback styles
         DEFAULT_STYLES = {
@@ -192,8 +189,22 @@ class SubtitleAgent:
         }
 
         # Resolve config overrides
-        styles_from_config = AGENTS_CONFIG.get("caption_styles", {})
-        style_cfg = styles_from_config.get(style_name) or DEFAULT_STYLES.get(style_name, DEFAULT_STYLES["hormozi"])
+        style_cfg = {}
+        if isinstance(style, dict):
+            style_cfg = style.get("subtitle_style", style)
+            style_name = style.get("style_name", "custom")
+            logger.info(f"burn_subtitles: Using dynamic style: {style_name}")
+        else:
+            style_name = style if style else getattr(self, "caption_style", "hormozi")
+            logger.info(f"burn_subtitles: Using style '{style_name}'")
+            styles_from_config = AGENTS_CONFIG.get("caption_styles", {})
+            style_cfg = styles_from_config.get(style_name) or DEFAULT_STYLES.get(style_name, DEFAULT_STYLES["hormozi"])
+
+        # Determine font file path and weight
+        font_name_cfg = style_cfg.get("font_name", "Arial")
+        font_weight_cfg = style_cfg.get("font_weight", 700)
+        font_path = self._find_font(font_name_cfg, font_weight_cfg)
+        font_path_escaped = font_path.replace('\\', '/').replace(':', '\\:')
 
         cfg_font_size = style_cfg.get("font_size", font_size)
         cfg_font_color = style_cfg.get("font_color", font_color)
@@ -209,7 +220,8 @@ class SubtitleAgent:
 
         # Outline and shadow checks
         has_outline = cfg_outline_color != "none" and cfg_outline_width > 0
-        has_shadow = cfg_shadow_color != "none" and cfg_shadow_width > 0
+        cfg_has_shadow_bool = style_cfg.get("has_shadow", True)
+        has_shadow = cfg_has_shadow_bool and cfg_shadow_color != "none" and cfg_shadow_width > 0
         has_box = cfg_back_color != "none"
 
         # Load font in Pillow to measure text dimensions
@@ -285,7 +297,7 @@ class SubtitleAgent:
 
                 escaped_line_text = line_text.replace('\\', '\\\\').replace("'", "\\'").replace('%', '\\%')
 
-                if cfg_animate and style_name == "hormozi":
+                if cfg_animate and style_name in ["hormozi", "custom"]:
                     # 1. Draw inactive line layer (contains box and shadow/outline if set)
                     inactive_drawtext = [
                         f"drawtext=fontfile='{font_path_escaped}'",
@@ -558,11 +570,103 @@ class SubtitleAgent:
 
         return captions
 
-    def _find_font(self) -> str:
+    def generate_aesthetic_style(
+        self,
+        prompt: str,
+        storyline: str,
+        video_style: str
+    ) -> Dict[str, Any]:
         """
-        Finds a suitable TTF font on the system.
+        Dynamically analyzes the video's prompt, storyline, and video_style
+        to choose a Google Font and custom caption parameters that match the theme.
+        """
+        import os
+        import json
+        from groq import Groq
+        from backend_ai.core.config_loader import AGENTS_CONFIG
+        
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            logger.warning("GROQ_API_KEY not found in SubtitleAgent; falling back to default style.")
+            return {}
+            
+        client = Groq(api_key=api_key)
+        
+        system_prompt = (
+            "You are a typography and video style expert. Given a video project's title/prompt, storyline, and style, "
+            "select the perfect typography settings for both subtitles (burnt-in captions synced with speech) "
+            "and text overlays (on-screen title cards, keywords, or section headers chosen by the director).\n"
+            "Choose suitable Google Font families (e.g. 'Poppins', 'Montserrat', 'Lilita One', 'Bebas Neue', 'Cinzel', "
+            "'Oswald', 'Roboto', 'Permanent Marker', 'Fredoka', 'Playfair Display') and appropriate options.\n"
+            "Ensure the font fits the mood (e.g., 'Lilita One' or 'Bebas Neue' for bold social media reels, "
+            "'Cinzel' for dramatic cinematic videos, 'Montserrat' or 'Poppins' for clean modern vlogs).\n"
+            "Your response must be a single JSON object (with no markdown wrapping) matching this JSON schema:\n"
+            "{\n"
+            "  \"subtitle_style\": {\n"
+            "    \"font_name\": \"string (the Google Font name)\",\n"
+            "    \"font_size\": \"integer (usually between 32 and 60)\",\n"
+            "    \"font_weight\": \"integer (standard Google Font weight: 400, 500, 700, 800, 900)\",\n"
+            "    \"font_color\": \"string (color name of active/highlighted text like 'white', 'yellow', 'cyan', 'lime', 'orange', 'red', 'magenta')\",\n"
+            "    \"inactive_color\": \"string (color name of inactive/background text like 'white', 'gray', 'lightgray')\",\n"
+            "    \"outline_color\": \"string (color name like 'black' or 'none')\",\n"
+            "    \"outline_width\": \"integer (between 0 and 5)\",\n"
+            "    \"back_color\": \"string (like 'black@0.4' for translucent background, or 'none')\",\n"
+            "    \"has_shadow\": \"boolean\",\n"
+            "    \"shadow_color\": \"string (like 'black' or 'none')\",\n"
+            "    \"shadow_width\": \"integer (between 0 and 4)\",\n"
+            "    \"uppercase\": \"boolean\",\n"
+            "    \"animate\": \"boolean\"\n"
+            "  },\n"
+            "  \"text_overlay_style\": {\n"
+            "    \"font_name\": \"string (the Google Font name for headers)\",\n"
+            "    \"font_size\": \"integer (larger for headers, usually between 60 and 90)\",\n"
+            "    \"font_weight\": \"integer (standard Google Font weight: 700, 800, 900)\",\n"
+            "    \"font_color\": \"string (color name like 'white', 'yellow', 'cyan', 'lime', 'orange', 'red', 'magenta')\",\n"
+            "    \"outline_color\": \"string (color name like 'black' or 'none')\",\n"
+            "    \"outline_width\": \"integer (between 0 and 5)\",\n"
+            "    \"back_color\": \"string (like 'black@0.4' or 'none')\",\n"
+            "    \"has_shadow\": \"boolean\",\n"
+            "    \"shadow_color\": \"string (like 'black' or 'none')\",\n"
+            "    \"shadow_width\": \"integer (between 0 and 4)\",\n"
+            "    \"uppercase\": \"boolean\"\n"
+            "  }\n"
+            "}"
+        )
+        
+        user_msg = (
+            f"Project Title: {prompt}\n"
+            f"Storyline: {storyline}\n"
+            f"Video Style: {video_style}"
+        )
+        
+        try:
+            chat_completion = client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_msg}
+                ],
+                model=AGENTS_CONFIG.get("creative_director", {}).get("model", "llama-3.3-70b-versatile"),
+                response_format={"type": "json_object"}
+            )
+            response_text = chat_completion.choices[0].message.content
+            style_data = json.loads(response_text)
+            logger.info(f"Dynamic subtitle style generated: {style_data}")
+            return style_data
+        except Exception as e:
+            logger.warning(f"Failed to generate dynamic subtitle style via LLM: {e}")
+            return {}
+
+    def _find_font(self, font_name: Optional[str] = None, weight: int = 700) -> str:
+        """
+        Finds a suitable TTF font on the system or downloads it via Google Fonts.
         Falls back to a known Windows system font.
         """
+        from backend_ai.utils.font_downloader import get_font_path
+        try:
+            return get_font_path(font_name, weight)
+        except Exception as e:
+            logger.warning(f"Could not resolve font '{font_name}' using downloader: {e}. Falling back to default candidates.")
+            
         candidates = [
             "C:/Windows/Fonts/Impact.ttf",     # High CTR impact social media font
             "C:/Windows/Fonts/arialbd.ttf",   # Arial Bold

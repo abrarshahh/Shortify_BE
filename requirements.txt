@@ -59,3 +59,4 @@ numpy
 argon2-cffi
 mediapipe
 opencv-python
+fonttools

@@ -48,6 +48,7 @@ video_editor:
 
 caption_styles:
   minimal:
+    font_name: "Roboto"
     font_size: 32
     font_color: "white"
     outline_color: "none"
@@ -56,6 +57,7 @@ caption_styles:
     uppercase: false
     animate: false
   bold:
+    font_name: "Montserrat"
     font_size: 52
     font_color: "white"
     outline_color: "black"
@@ -65,6 +67,7 @@ caption_styles:
     uppercase: true
     animate: false
   hormozi:
+    font_name: "Lilita One"
     font_size: 44
     font_color: "yellow"
     inactive_color: "white"
@@ -76,6 +79,7 @@ caption_styles:
     uppercase: true
     animate: true
   subtitle:
+    font_name: "Arial"
     font_size: 28
     font_color: "white"
     outline_color: "none"

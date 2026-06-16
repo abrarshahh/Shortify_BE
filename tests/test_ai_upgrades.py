@@ -169,7 +169,7 @@ def test_subtitle_style_loading_and_wrapping(monkeypatch):
     from backend_ai.agents.subtitle_agent import SubtitleAgent
 
     # Mock font file lookup to return a fake font
-    monkeypatch.setattr(SubtitleAgent, "_find_font", lambda self: "fake_font.ttf")
+    monkeypatch.setattr(SubtitleAgent, "_find_font", lambda self, *args, **kwargs: "fake_font.ttf")
 
     # Mock subprocess.run
     class MockSubprocessResult:
@@ -485,3 +485,368 @@ def test_agent_controlled_ducking_render_intervals(monkeypatch):
     # Second clip had keep_original_audio=False -> False
     assert build_concat_called["clip_has_audio"] == [True, False]
 
+
+def test_font_downloader_and_validation(tmp_path, monkeypatch):
+    import io
+    from backend_ai.utils import font_downloader
+    
+    # Redirect cache dir to tmp_path
+    monkeypatch.setattr(font_downloader, "FONTS_DIR", str(tmp_path))
+    
+    # Mock TTFont to validate fake files
+    class MockTTFont:
+        def __init__(self, path):
+            self.path = path
+            self.names = [
+                type("Record", (object,), {"nameID": 1, "toUnicode": lambda self: "MockFontFamily"})()
+            ]
+        def get(self, table_name):
+            return {}
+        def close(self):
+            pass
+        def __getitem__(self, key):
+            if key == "name":
+                return self
+            raise KeyError(key)
+
+    monkeypatch.setattr(font_downloader, "TTFont", MockTTFont)
+    
+    # Mock os.path.getsize to avoid accessing the filesystem directly
+    monkeypatch.setattr("os.path.getsize", lambda path: 2000)
+    
+    # Mock os.path.exists specifically for the target download path
+    orig_exists = os.path.exists
+    downloaded = False
+    def mock_exists(path):
+        if str(tmp_path) in path:
+            return downloaded
+        return orig_exists(path)
+    monkeypatch.setattr("os.path.exists", mock_exists)
+    
+    # Mock urllib.request.urlopen to return mock CSS and mock TTF data
+    calls = []
+    class MockResponse:
+        def __init__(self, data):
+            self.data = data
+        def read(self, *args, **kwargs):
+            return self.data
+        def decode(self, *args, **kwargs):
+            return self.data.decode(*args, **kwargs)
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+    def mock_urlopen(req, *args, **kwargs):
+        nonlocal downloaded
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        calls.append(url)
+        if "css2" in url:
+            css_content = """
+            @font-face {
+              font-family: 'Poppins';
+              src: url(https://fonts.gstatic.com/s/poppins/v24/pxiByp8kv8JHgFVrLCz7V1tvEv-L.ttf) format('truetype');
+            }
+            """
+            return MockResponse(css_content.encode('utf-8'))
+        else:
+            downloaded = True
+            return MockResponse(b'\x00\x01\x00\x00_fake_font_data_')
+
+    monkeypatch.setattr("urllib.request.urlopen", mock_urlopen)
+    
+    # 1. Test successful download and fonttools validation
+    font_path = font_downloader.get_font_path("Poppins")
+    assert "poppins_700.ttf" in font_path.replace("\\", "/").lower()
+    assert len(calls) == 2
+    assert font_downloader.validate_font_file(font_path) is True
+    assert font_downloader.get_font_family_name(font_path) == "MockFontFamily"
+
+    # 2. Test fallback when download fails
+    calls.clear()
+    downloaded = False
+    def mock_urlopen_fail(req, *args, **kwargs):
+        raise RuntimeError("API offline")
+        
+    monkeypatch.setattr("urllib.request.urlopen", mock_urlopen_fail)
+    
+    # Temporarily bypass mock_exists for fallback checks to check actual filesystem fonts
+    monkeypatch.setattr("os.path.exists", orig_exists)
+    fallback_path = font_downloader.get_font_path("UnavailableFont")
+    assert os.path.exists(fallback_path)
+
+
+def test_dynamic_aesthetic_styling_generation(monkeypatch):
+    from backend_ai.agents.subtitle_agent import SubtitleAgent
+    
+    agent = SubtitleAgent()
+    
+    # Mock Groq client and completion response
+    class MockChatCompletionChoiceMessage:
+        content = """
+        {
+          "subtitle_style": {
+            "font_name": "Special Aardvark",
+            "font_size": 48,
+            "font_weight": 700,
+            "font_color": "cyan",
+            "inactive_color": "gray",
+            "outline_color": "black",
+            "outline_width": 3,
+            "back_color": "none",
+            "has_shadow": true,
+            "shadow_color": "none",
+            "shadow_width": 0,
+            "uppercase": true,
+            "animate": true
+          },
+          "text_overlay_style": {
+            "font_name": "Special Aardvark Heavy",
+            "font_size": 72,
+            "font_weight": 900,
+            "font_color": "magenta",
+            "outline_color": "black",
+            "outline_width": 4,
+            "back_color": "none",
+            "has_shadow": true,
+            "shadow_color": "none",
+            "shadow_width": 0,
+            "uppercase": true
+          }
+        }
+        """
+        
+    class MockChatCompletionChoice:
+        message = MockChatCompletionChoiceMessage()
+        
+    class MockChatCompletion:
+        choices = [MockChatCompletionChoice()]
+        
+    class MockChatCompletions:
+        def create(self, *args, **kwargs):
+            return MockChatCompletion()
+            
+    class MockChat:
+        completions = MockChatCompletions()
+        
+    class MockGroq:
+        def __init__(self, api_key):
+            self.chat = MockChat()
+            
+    monkeypatch.setenv("GROQ_API_KEY", "mock_key")
+    monkeypatch.setattr("groq.Groq", MockGroq)
+    
+    # Verify generate_aesthetic_style correctly calls and parses dynamic settings
+    style = agent.generate_aesthetic_style(
+        prompt="Cool Trekking Video",
+        storyline="Trekking in mountains",
+        video_style="cinematic"
+    )
+    
+    assert style["subtitle_style"]["font_name"] == "Special Aardvark"
+    assert style["subtitle_style"]["font_size"] == 48
+    assert style["subtitle_style"]["font_color"] == "cyan"
+    assert style["subtitle_style"]["inactive_color"] == "gray"
+    assert style["subtitle_style"]["uppercase"] is True
+    assert style["subtitle_style"]["animate"] is True
+    assert style["text_overlay_style"]["font_name"] == "Special Aardvark Heavy"
+    assert style["text_overlay_style"]["font_color"] == "magenta"
+
+
+def test_orchestrator_dynamic_styling_coordination(monkeypatch):
+    from backend_ai.orchestrator import ShortifyOrchestrator
+    
+    orchestrator = ShortifyOrchestrator()
+    
+    # Mock dynamic style generation to return mock style
+    mock_style = {"font_name": "Special Aardvark", "font_size": 48}
+    monkeypatch.setattr(
+        orchestrator.subtitle_agent, 
+        "generate_aesthetic_style", 
+        lambda *args, **kwargs: mock_style
+    )
+    
+    # Mock rendering editor and check that dynamic_style is received
+    render_received_style = None
+    def mock_render(self, edl, music_path, output_filename, aspect_ratio, rhythm_data, clip_scores, dynamic_style=None):
+        nonlocal render_received_style
+        render_received_style = dynamic_style
+        return "rendered_output.mp4"
+        
+    from backend_ai.services.editor_service import VideoEditor
+    monkeypatch.setattr(VideoEditor, "render", mock_render)
+    
+    # Mock file checks and metadata paths
+    monkeypatch.setattr("os.path.dirname", lambda path: ".")
+    monkeypatch.setattr("os.path.exists", lambda path: True)
+    
+    state = {
+        "video_paths": ["dummy.mp4"],
+        "music_path": None,
+        "project_title": "Cool Trekking Video",
+        "output_filename": "final.mp4",
+        "target_duration": 10,
+        "aspect_ratio": "9:16",
+        "style": "cinematic",
+        "edl": {"storyline": "Trekking in mountains", "timeline": []},
+        "clip_scores": {}
+    }
+    
+    result = orchestrator.node_render_video(state)
+    assert result["dynamic_style"] == mock_style
+    assert render_received_style == mock_style
+
+
+def test_dynamic_subtitle_animation_and_overlay_colors(monkeypatch):
+    from backend_ai.agents.subtitle_agent import SubtitleAgent
+    from backend_ai.services.editor_service import VideoEditor
+    
+    # 1. Test SubtitleAgent burn_subtitles with custom dynamic animate style
+    # Mock font file lookup to return a fake font
+    monkeypatch.setattr(SubtitleAgent, "_find_font", lambda self, *args, **kwargs: "fake_font.ttf")
+
+    # Mock subprocess.run
+    class MockSubprocessResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+    monkeypatch.setattr("subprocess.run", lambda cmd, **kwargs: MockSubprocessResult())
+
+    # Mock open to capture filter content
+    written_filter = ""
+    original_open = open
+    def mock_open(file, *args, **kwargs):
+        nonlocal written_filter
+        filename = str(file)
+        if "temp_filter_" in filename:
+            class MockFile:
+                def write(self, data):
+                    nonlocal written_filter
+                    written_filter = data
+                def __enter__(self): return self
+                def __exit__(self, *a): pass
+            return MockFile()
+        return original_open(file, *args, **kwargs)
+    monkeypatch.setattr("builtins.open", mock_open)
+    monkeypatch.setattr("os.path.exists", lambda path: True)
+
+    # Mock PIL font metrics
+    class MockFont:
+        def getlength(self, text):
+            return len(text) * 10
+    monkeypatch.setattr("PIL.ImageFont.truetype", lambda path, size: MockFont())
+
+    agent = SubtitleAgent()
+    
+    # Nested dynamic style structure
+    custom_style = {
+        "subtitle_style": {
+            "font_name": "Special Aardvark",
+            "font_size": 48,
+            "font_weight": 500,
+            "font_color": "magenta",
+            "inactive_color": "cyan",
+            "outline_color": "black",
+            "outline_width": 3,
+            "back_color": "none",
+            "has_shadow": True,
+            "shadow_color": "blue",
+            "shadow_width": 2,
+            "uppercase": True,
+            "animate": True
+        },
+        "text_overlay_style": {
+            "font_name": "Special Aardvark Heavy",
+            "font_size": 72,
+            "font_weight": 900,
+            "font_color": "magenta",
+            "outline_color": "black",
+            "outline_width": 4,
+            "back_color": "none",
+            "has_shadow": True,
+            "shadow_color": "red",
+            "shadow_width": 3,
+            "uppercase": True
+        }
+    }
+    
+    captions = [
+        {
+            "start": 1.0,
+            "end": 2.0,
+            "text": "Hello world",
+            "words": [
+                {"word": "Hello", "start": 1.0, "end": 1.5},
+                {"word": "world", "start": 1.5, "end": 2.0}
+            ]
+        }
+    ]
+    
+    agent.burn_subtitles("in.mp4", captions, "out.mp4", style=custom_style)
+    
+    # Verify word highlight animation was triggered by asserting inactive layer color and active highlight color are present
+    assert "fontcolor=cyan" in written_filter        # Inactive color
+    assert "fontcolor=magenta" in written_filter     # Active highlighted color
+    assert "fontsize=48" in written_filter
+    assert "borderw=3" in written_filter
+    assert "bordercolor=black" in written_filter
+    assert "shadowx=2" in written_filter
+    assert "shadowy=2" in written_filter
+    assert "shadowcolor=blue" in written_filter
+    
+    # 2. Test VideoEditor text overlay styling dynamically
+    editor = VideoEditor(clips_dir=".")
+    
+    # Mock check_has_audio to return True
+    monkeypatch.setattr(editor, "_check_has_audio", lambda path: True)
+    monkeypatch.setattr(editor, "_detect_non_silent_intervals", lambda path: ([(1.0, 2.0)], 2.0))
+    monkeypatch.setattr(editor, "_get_audio_normalization_gain", lambda path: 1.0)
+    monkeypatch.setattr(VideoEditor, "_find_font", lambda self, *args, **kwargs: "fake_font.ttf")
+    
+    # Mock cv2.VideoCapture to return mock duration/size
+    class MockVideoCapture:
+        def __init__(self, path): pass
+        def isOpened(self): return True
+        def get(self, prop):
+            if prop == 5: return 30.0 # FPS
+            if prop == 7: return 60.0 # Frame count
+            return 100
+        def release(self): pass
+    monkeypatch.setattr("cv2.VideoCapture", MockVideoCapture)
+    
+    # Intercept subprocess.run to check the text overlay filter complex parameters
+    ffmpeg_cmds = []
+    def mock_run_ffmpeg(cmd, *args, **kwargs):
+        ffmpeg_cmds.append(cmd)
+        return MockSubprocessResult()
+    monkeypatch.setattr("subprocess.run", mock_run_ffmpeg)
+    
+    editor._process_single_clip(
+        clip_path="dummy.mp4",
+        is_image=False,
+        start_in=1.0,
+        end_in=2.0,
+        target_duration=1.0,
+        transition="none",
+        text_overlay="Title Overlay Text",
+        pacing="jump-cut",
+        music_active=True,
+        temp_path="temp_out.mp4",
+        face_anchor_x=0.5,
+        keep_original_audio=True,
+        dynamic_style=custom_style
+    )
+    
+    assert len(ffmpeg_cmds) == 1
+    filter_complex_arg = next(arg for arg in ffmpeg_cmds[0] if "drawtext" in arg)
+    
+    # Ensure text overlay parameters are dynamic and match custom_style text_overlay_style
+    assert "drawtext" in filter_complex_arg
+    assert "fontcolor=magenta" in filter_complex_arg
+    assert "fontsize=72" in filter_complex_arg
+    assert "borderw=4" in filter_complex_arg
+    assert "bordercolor=black" in filter_complex_arg
+    assert "shadowx=3" in filter_complex_arg
+    assert "shadowy=3" in filter_complex_arg
+    assert "shadowcolor=red" in filter_complex_arg
+    assert "Title Overlay Text" in filter_complex_arg

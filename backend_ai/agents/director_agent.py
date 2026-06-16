@@ -367,7 +367,7 @@ class CreativeDirector:
         - EXACT DURATION REQUIRED: The total expected render duration (sum of effective clip durations) MUST equal {target_duration} seconds. For each clip, its effective duration is: (end_in_clip - start_in_clip) / 1.5 if details.pacing_style is 'speed-ramp', and (end_in_clip - start_in_clip) otherwise. The sum of these effective durations must be exactly {target_duration} seconds.
         - DURATION MATCH: Ensure 'timeline_end - timeline_start' is exactly equal to 'end_in_clip - start_in_clip' for each clip.
         - MUSIC SELECTION: Use 'music_start_offset' to pick a good starting point from the audio track (e.g., an energy segment).
-        - TEXT OVERLAYS: Only provide a 'text_overlay' if the user explicitly requests on-screen text, captions, or subtitles. Otherwise, it MUST be an empty string ("").
+        - TEXT OVERLAYS: You, as the viral video analyst, must decide which key moments or scene transitions would benefit from on-screen text overlays (title cards, main hooks, call-to-actions, or section headers). For each timeline clip, determine if a short, punchy text overlay (1-4 words) fits the scene, and if so, write it in the 'text_overlay' field. Do not include subtitles of dialogue here (subtitles are processed separately). Use text overlays strategically to capture and keep viewer attention.
         - TRANSITIONS: Choose transitions deliberately based on style and narrative moment:
           - 'none' or 'jump_cut': default for fast_cut style, high energy sequences, beat-sync cuts. Never use crossfade on beat-sync cuts.
           - 'crossfade': smooth scene changes, travel style, when two clips share similar mood or color.

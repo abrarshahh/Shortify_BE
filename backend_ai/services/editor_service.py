@@ -129,8 +129,14 @@ class VideoEditor:
             logger.warning(f"Audio normalization calculation failed: {e}")
         return 1.0
 
-    def _find_font(self) -> str:
-        """Finds a suitable TTF font on the system for text overlays."""
+    def _find_font(self, font_name: Optional[str] = None, weight: int = 700) -> str:
+        """Finds a suitable TTF font on the system or downloads it via Google Fonts."""
+        from backend_ai.utils.font_downloader import get_font_path
+        try:
+            return get_font_path(font_name, weight)
+        except Exception as e:
+            logger.warning(f"Could not resolve font '{font_name}' using downloader: {e}. Falling back to default candidates.")
+
         candidates = [
             "C:/Windows/Fonts/arialbd.ttf",
             "C:/Windows/Fonts/arial.ttf",
@@ -268,7 +274,8 @@ class VideoEditor:
         music_active: bool,
         temp_path: str,
         face_anchor_x: float = 0.5,
-        keep_original_audio: bool = True
+        keep_original_audio: bool = True,
+        dynamic_style: Optional[Dict[str, Any]] = None
     ) -> float:
         """
         Processes a single timeline item (trim, scale, crop, face-anchored, normalize, zoom, text-overlay)
@@ -426,11 +433,52 @@ class VideoEditor:
             
         # Apply text overlay
         if text_overlay:
-            font_path = self._find_font()
+            if dynamic_style:
+                style_cfg = dynamic_style.get("text_overlay_style") or dynamic_style
+            else:
+                style_name = AGENTS_CONFIG.get("subtitle_agent", {}).get("caption_style", "hormozi")
+                style_cfg = AGENTS_CONFIG.get("caption_styles", {}).get(style_name, {})
+                
+            font_name = style_cfg.get("font_name", "Arial")
+            font_color = style_cfg.get("font_color", "white")
+            font_size = style_cfg.get("font_size", 70)
+            font_weight = style_cfg.get("font_weight", 700)
+            if not dynamic_style and font_size < 50:
+                font_size = 70
+                
+            outline_color = style_cfg.get("outline_color", "black")
+            outline_width = style_cfg.get("outline_width", 2)
+            if outline_color == "none":
+                outline_width = 0
+
+            font_path = self._find_font(font_name, font_weight)
             escaped_text = self._escape_drawtext(text_overlay)
             font_path_escaped = font_path.replace("\\", "/").replace(":", "\\:")
+            
+            drawtext_parts = [
+                f"drawtext=fontfile='{font_path_escaped}'",
+                f"text='{escaped_text}'",
+                f"fontsize={font_size}",
+                f"fontcolor={font_color}",
+                "x=(w-text_w)/2",
+                "y=h*0.15"
+            ]
+            
+            # Handle shadow option dynamically
+            cfg_has_shadow = style_cfg.get("has_shadow", True)
+            shadow_color = style_cfg.get("shadow_color", "none")
+            shadow_width = style_cfg.get("shadow_width", 0)
+            if cfg_has_shadow and shadow_color != "none" and shadow_width > 0:
+                drawtext_parts.append(f"shadowx={shadow_width}")
+                drawtext_parts.append(f"shadowy={shadow_width}")
+                drawtext_parts.append(f"shadowcolor={shadow_color}")
+
+            if outline_width > 0:
+                drawtext_parts.append(f"borderw={outline_width}")
+                drawtext_parts.append(f"bordercolor={outline_color}")
+                
             filter_complex_parts.append(
-                f"{video_proc_in}drawtext=fontfile='{font_path_escaped}':text='{escaped_text}':fontsize=70:fontcolor=white:borderw=2:bordercolor=black:x=(w-text_w)/2:y=h*0.15[v_text]"
+                f"{video_proc_in}{':'.join(drawtext_parts)}[v_text]"
             )
             video_proc_in = "[v_text]"
             
@@ -788,7 +836,8 @@ class VideoEditor:
         output_filename: str = "shortify_output.mp4",
         aspect_ratio: str = "9:16",
         rhythm_data: Optional[Dict[str, Any]] = None,
-        clip_scores: Optional[Dict[str, Any]] = None
+        clip_scores: Optional[Dict[str, Any]] = None,
+        dynamic_style: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Renders the final video from an EDL produced by CreativeDirector.
@@ -912,7 +961,8 @@ class VideoEditor:
                         music_active=bool(music_path and os.path.exists(music_path)),
                         temp_path=temp_clip_path,
                         face_anchor_x=face_anchor_x,
-                        keep_original_audio=keep_aud
+                        keep_original_audio=keep_aud,
+                        dynamic_style=dynamic_style
                     )
                     
                     processed_temp_files.append(temp_clip_path)

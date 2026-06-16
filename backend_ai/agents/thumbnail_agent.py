@@ -2,7 +2,7 @@ import os
 import logging
 import numpy as np
 from PIL import Image, ImageEnhance, ImageDraw, ImageFont
-from typing import Optional
+from typing import Optional, Dict, Any
 
 logger = logging.getLogger("agents.thumbnail")
 
@@ -21,7 +21,8 @@ class ThumbnailAgent:
         self,
         video_path: str,
         output_dir: str,
-        overlay_text: Optional[str] = None
+        overlay_text: Optional[str] = None,
+        style: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Generates a stylized thumbnail.jpg from the video clip.
@@ -79,7 +80,7 @@ class ThumbnailAgent:
         # 3. Text Overlay with legibility protections (drop shadow + black border)
         if overlay_text:
             try:
-                self._draw_overlay_text(img, overlay_text)
+                self._draw_overlay_text(img, overlay_text, style=style)
             except Exception as e:
                 logger.warning(f"Text overlay failed: {e}")
 
@@ -109,7 +110,7 @@ class ThumbnailAgent:
             
         return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8))
 
-    def _draw_overlay_text(self, img: Image.Image, text: str):
+    def _draw_overlay_text(self, img: Image.Image, text: str, style: Optional[Dict[str, Any]] = None):
         """Draws large, professional dynamic subtitle text with drop shadow in center."""
         draw = ImageDraw.Draw(img)
         width, height = img.size
@@ -119,25 +120,47 @@ class ThumbnailAgent:
         if len(text) > 40:
             text = text[:37] + "..."
             
-        # Select professional bold font if available, fallback otherwise
+        # Resolve font from subtitle style configuration
+        from backend_ai.core.config_loader import AGENTS_CONFIG
+        from backend_ai.utils.font_downloader import get_font_path
+        
+        if style:
+            style_cfg = style.get("text_overlay_style") or style.get("subtitle_style") or style
+            font_name = style_cfg.get("font_name", "Arial")
+            font_color = style_cfg.get("font_color", "yellow")
+            font_weight = style_cfg.get("font_weight", 700)
+        else:
+            style_name = AGENTS_CONFIG.get("subtitle_agent", {}).get("caption_style", "hormozi")
+            caption_style_cfg = AGENTS_CONFIG.get("caption_styles", {}).get(style_name, {})
+            font_name = caption_style_cfg.get("font_name", "Arial")
+            font_color = caption_style_cfg.get("font_color", "yellow")
+            font_weight = caption_style_cfg.get("font_weight", 700)
+        
+        font_size = int(height * 0.08)  # Dynamic font size based on height
+        
         font = None
-        font_paths = [
-            "C:\\Windows\\Fonts\\Arial.ttf",
-            "C:\\Windows\\Fonts\\arialbd.ttf",
-            "C:\\Windows\\Fonts\\Impact.ttf",
-            "C:\\Windows\\Fonts\\tahoma.ttf",
-        ]
-        
-        font_size = int(height * 0.08) # Dynamic font size based on height
-        
-        for fp in font_paths:
-            if os.path.exists(fp):
-                try:
-                    font = ImageFont.truetype(fp, font_size)
-                    break
-                except Exception:
-                    continue
-                    
+        try:
+            fp = get_font_path(font_name, font_weight)
+            font = ImageFont.truetype(fp, font_size)
+        except Exception as e:
+            logger.warning(f"Could not resolve font '{font_name}' for thumbnail: {e}")
+            
+        if font is None:
+            # Fallback candidates
+            font_paths = [
+                "C:\\Windows\\Fonts\\Arial.ttf",
+                "C:\\Windows\\Fonts\\arialbd.ttf",
+                "C:\\Windows\\Fonts\\Impact.ttf",
+                "C:\\Windows\\Fonts\\tahoma.ttf",
+            ]
+            for fp in font_paths:
+                if os.path.exists(fp):
+                    try:
+                        font = ImageFont.truetype(fp, font_size)
+                        break
+                    except Exception:
+                        continue
+
         if font is None:
             font = ImageFont.load_default()
 
@@ -159,8 +182,8 @@ class ThumbnailAgent:
         for dx, dy in [(-2, -2), (-2, 2), (2, -2), (2, 2), (0, -2), (0, 2), (-2, 0), (2, 0)]:
             draw.text((x + dx, y + dy), text, font=font, fill=(0, 0, 0))
 
-        # Main text (vibrant aesthetic yellow)
-        draw.text((x, y), text, font=font, fill=(255, 220, 0))
+        # Main text (vibrant aesthetic dynamic color)
+        draw.text((x, y), text, font=font, fill=font_color)
 
 
 if __name__ == "__main__":

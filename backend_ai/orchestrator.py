@@ -53,6 +53,7 @@ class AgentState(TypedDict):
     progress_callback: Optional[Callable[[int, str], None]]
     skipped_clips: Optional[List[str]]
     clip_scores: Optional[Dict[str, Any]]
+    dynamic_style: Optional[Dict[str, Any]]
 
 
 class ShortifyOrchestrator:
@@ -283,6 +284,16 @@ class ShortifyOrchestrator:
         
         output_filename = f"render_{state['output_filename']}"
         
+        # Dynamically generate typography style
+        storyline = state.get("edl", {}).get("storyline", "")
+        video_style = state.get("style", "cinematic")
+        
+        dynamic_style = self.subtitle_agent.generate_aesthetic_style(
+            prompt=state["project_title"],
+            storyline=storyline,
+            video_style=video_style
+        )
+        
         logger.info(f"Rendering EDL to {output_filename}...")
         rendered_path = editor.render(
             edl=state["edl"],
@@ -290,12 +301,14 @@ class ShortifyOrchestrator:
             output_filename=output_filename,
             aspect_ratio=state.get("aspect_ratio", "9:16"),
             rhythm_data=state.get("rhythm_data", {}),
-            clip_scores=state.get("clip_scores")
+            clip_scores=state.get("clip_scores"),
+            dynamic_style=dynamic_style
         )
         
         return {
             "rendered_video_path": rendered_path,
-            "skipped_clips": getattr(editor, "skipped_clips", [])
+            "skipped_clips": getattr(editor, "skipped_clips", []),
+            "dynamic_style": dynamic_style
         }
 
     def node_color_grade(self, state: AgentState) -> Dict:
@@ -394,14 +407,16 @@ class ShortifyOrchestrator:
         logger.info(f"Transcribing audio for {video_path}...")
         transcription = self.subtitle_agent.transcribe(video_path)
         
+        dynamic_style = state.get("dynamic_style")
+        
         if transcription["captions"]:
             logger.info(f"Burning subtitles to {final_output}...")
-            caption_style = getattr(self.subtitle_agent, "caption_style", "hormozi")
+            style_param = dynamic_style if dynamic_style else getattr(self.subtitle_agent, "caption_style", "hormozi")
             final_video_path = self.subtitle_agent.burn_subtitles(
                 video_path=video_path,
                 captions=transcription["captions"],
                 output_path=final_output,
-                style=caption_style
+                style=style_param
             )
         else:
             logger.info("No spoken words detected. Subtitle burning skipped.")
@@ -419,7 +434,8 @@ class ShortifyOrchestrator:
             self.thumbnail_agent.generate_thumbnail(
                 video_path=final_video_path,
                 output_dir=self.exports_dir,
-                overlay_text=overlay_text
+                overlay_text=overlay_text,
+                style=dynamic_style
             )
         except Exception as e:
             logger.warning(f"Cover thumbnail generation failed: {e}")
