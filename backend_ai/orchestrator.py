@@ -294,6 +294,38 @@ class ShortifyOrchestrator:
             video_style=video_style
         )
         
+        # Download dynamic stickers and visual effects overlays
+        edl = state.get("edl", {})
+        timeline = edl.get("timeline", [])
+        from backend_ai.utils.effect_downloader import download_giphy_sticker, download_pixabay_effect
+        
+        for item in timeline:
+            details = item.get("details", {})
+            sticker_query = details.get("sticker_query", "")
+            effect_query = details.get("effect_query", "")
+            effect_type = details.get("effect_type", "none")
+            
+            # Download Giphy sticker if query is set
+            sticker_path = None
+            if sticker_query:
+                try:
+                    sticker_path = download_giphy_sticker(sticker_query)
+                except Exception as e:
+                    logger.warning(f"Failed to download sticker for query '{sticker_query}': {e}")
+            if sticker_path:
+                item["sticker_path"] = sticker_path
+                item["sticker_position"] = details.get("sticker_position", "bottom-center")
+                
+            # Download Pixabay overlay loop if query is set
+            effect_path = None
+            if effect_type != "none" and effect_query:
+                try:
+                    effect_path = download_pixabay_effect(effect_query)
+                except Exception as e:
+                    logger.warning(f"Failed to download effect for query '{effect_query}': {e}")
+            if effect_path:
+                item["effect_path"] = effect_path
+
         logger.info(f"Rendering EDL to {output_filename}...")
         rendered_path = editor.render(
             edl=state["edl"],

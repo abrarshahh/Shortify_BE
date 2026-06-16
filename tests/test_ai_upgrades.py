@@ -850,3 +850,67 @@ def test_dynamic_subtitle_animation_and_overlay_colors(monkeypatch):
     assert "shadowy=3" in filter_complex_arg
     assert "shadowcolor=red" in filter_complex_arg
     assert "Title Overlay Text" in filter_complex_arg
+
+
+def test_dynamic_stickers_and_effects(monkeypatch):
+    from backend_ai.services.editor_service import VideoEditor
+    
+    editor = VideoEditor(clips_dir=".")
+    
+    monkeypatch.setattr(editor, "_check_has_audio", lambda path: False)
+    monkeypatch.setattr(VideoEditor, "_find_font", lambda self, *args, **kwargs: "fake_font.ttf")
+    monkeypatch.setattr("os.path.exists", lambda path: True)
+    
+    class MockVideoCapture:
+        def __init__(self, path): pass
+        def isOpened(self): return True
+        def get(self, prop):
+            if prop == 5: return 30.0
+            if prop == 7: return 90.0
+            return 100
+        def release(self): pass
+    monkeypatch.setattr("cv2.VideoCapture", MockVideoCapture)
+    
+    ffmpeg_cmds = []
+    class MockSubprocessResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+    monkeypatch.setattr("subprocess.run", lambda cmd, *args, **kwargs: ffmpeg_cmds.append(cmd) or MockSubprocessResult())
+    
+    editor._process_single_clip(
+        clip_path="dummy.mp4",
+        is_image=False,
+        start_in=0.0,
+        end_in=3.0,
+        target_duration=3.0,
+        transition="none",
+        text_overlay="",
+        pacing="jump-cut",
+        music_active=False,
+        temp_path="temp_out.mp4",
+        face_anchor_x=0.5,
+        keep_original_audio=False,
+        sticker_path="fake_sticker.gif",
+        sticker_position="top-right",
+        effect_path="fake_effect.mp4"
+    )
+    
+    assert len(ffmpeg_cmds) == 1
+    cmd = ffmpeg_cmds[0]
+    
+    # 1. Assert input parameters are structured correctly
+    assert "-ignore_loop" in cmd
+    assert "fake_sticker.gif" in cmd
+    assert "fake_effect.mp4" in cmd
+    
+    filter_complex_arg = next(arg for arg in cmd if "overlay" in arg)
+    
+    # 2. Assert screen blend visual effect overlay is set up
+    assert "[1:v]scale=1080:1920,loop=" in filter_complex_arg
+    assert "blend=all_mode=screen" in filter_complex_arg
+    
+    # 3. Assert sticker sizing and top-right positioning filters are mapped
+    assert "[2:v]scale=324:-1" in filter_complex_arg
+    assert "overlay=x='W-w-50':y='120'" in filter_complex_arg
+

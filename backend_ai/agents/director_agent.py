@@ -50,7 +50,17 @@ EDL_JSON_SCHEMA = {
                                 "enum": ["speed-ramp", "jump-cut", "cinematic-slow"]
                             },
                             "is_hook": {"type": "boolean"},
-                            "keep_original_audio": {"type": "boolean"}
+                            "keep_original_audio": {"type": "boolean"},
+                            "effect_type": {
+                                "type": "string",
+                                "enum": ["none", "particles", "overlay_blend", "light_leak", "smoke"]
+                            },
+                            "effect_query": {"type": "string"},
+                            "sticker_query": {"type": "string"},
+                            "sticker_position": {
+                                "type": "string",
+                                "enum": ["center", "top-left", "top-right", "bottom-left", "bottom-right", "bottom-center"]
+                            }
                         },
                         "required": ["visual_cue", "sound_design", "pacing_style", "is_hook", "keep_original_audio"],
                         "additionalProperties": False
@@ -345,7 +355,11 @@ class CreativeDirector:
                 "sound_design": "SFX (e.g., 'whoosh', 'bass drop')",
                 "pacing_style": "MUST be exactly one of: speed-ramp, jump-cut, cinematic-slow",
                 "is_hook": boolean,
-                "keep_original_audio": boolean
+                "keep_original_audio": boolean,
+                "effect_type": "none | particles | overlay_blend | light_leak | smoke",
+                "effect_query": "specific search query (like 'lens flare', 'bokeh', 'smoke', 'fog', or empty string)",
+                "sticker_query": "specific search query for Giphy (like 'subscribe', 'fire', 'arrow', or empty string)",
+                "sticker_position": "center | top-left | top-right | bottom-left | bottom-right | bottom-center"
               }}
             }}
           ]
@@ -368,6 +382,10 @@ class CreativeDirector:
         - DURATION MATCH: Ensure 'timeline_end - timeline_start' is exactly equal to 'end_in_clip - start_in_clip' for each clip.
         - MUSIC SELECTION: Use 'music_start_offset' to pick a good starting point from the audio track (e.g., an energy segment).
         - TEXT OVERLAYS: You, as the viral video analyst, must decide which key moments or scene transitions would benefit from on-screen text overlays (title cards, main hooks, call-to-actions, or section headers). For each timeline clip, determine if a short, punchy text overlay (1-4 words) fits the scene, and if so, write it in the 'text_overlay' field. Do not include subtitles of dialogue here (subtitles are processed separately). Use text overlays strategically to capture and keep viewer attention.
+        - STICKERS & VISUAL EFFECTS: Determine if a clip would benefit from a visual effect loop (smoke, particles, fog, light leak) or an animated transparent sticker:
+          - If a sticker is useful (e.g. arrows to draw focus, subscribe button, expressions like 'fire', 'wow', 'laugh'), set 'sticker_query' to a 1-2 word query and pick its spatial 'sticker_position'.
+          - If a clip needs an aesthetic layer (like floating dust, sparks, light leaks, bokeh, fog, smoke), set 'effect_type' and provide a search term in 'effect_query'.
+          - Set 'effect_type' to 'none' and leave queries empty ("") if they are not needed for a clip.
         - TRANSITIONS: Choose transitions deliberately based on style and narrative moment:
           - 'none' or 'jump_cut': default for fast_cut style, high energy sequences, beat-sync cuts. Never use crossfade on beat-sync cuts.
           - 'crossfade': smooth scene changes, travel style, when two clips share similar mood or color.

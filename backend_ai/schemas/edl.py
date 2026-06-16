@@ -31,6 +31,10 @@ class EDLClipDetails(BaseModel):
     pacing_style: PacingStyle
     is_hook: bool = False
     keep_original_audio: bool = True
+    effect_type: Optional[str] = "none"
+    effect_query: Optional[str] = ""
+    sticker_query: Optional[str] = ""
+    sticker_position: Optional[str] = "bottom-center"
 
 
 class EDLTimelineItem(BaseModel):

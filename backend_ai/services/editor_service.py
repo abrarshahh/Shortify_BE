@@ -275,243 +275,291 @@ class VideoEditor:
         temp_path: str,
         face_anchor_x: float = 0.5,
         keep_original_audio: bool = True,
-        dynamic_style: Optional[Dict[str, Any]] = None
+        dynamic_style: Optional[Dict[str, Any]] = None,
+        sticker_path: Optional[str] = None,
+        sticker_position: Optional[str] = "bottom-center",
+        effect_path: Optional[str] = None
     ) -> float:
         """
         Processes a single timeline item (trim, scale, crop, face-anchored, normalize, zoom, text-overlay)
         and exports it to a temp MP4 file. Returns the duration of the output clip.
         """
         target_w, target_h = self.target_w, self.target_h
+        temp_kb = None
 
-        if is_image:
-            duration = target_duration if target_duration > 0 else 3.0
-            kb_direction = "in"
-            self._create_ken_burns_video(
-                image_path=clip_path,
-                output_path=temp_path,
-                duration=duration,
-                target_w=target_w,
-                target_h=target_h,
-                direction=kb_direction,
-                face_anchor_x=face_anchor_x
+        try:
+            if is_image:
+                duration = target_duration if target_duration > 0 else 3.0
+                kb_direction = "in"
+                temp_kb = temp_path.replace(".mp4", "_kb_temp.mp4")
+                self._create_ken_burns_video(
+                    image_path=clip_path,
+                    output_path=temp_kb,
+                    duration=duration,
+                    target_w=target_w,
+                    target_h=target_h,
+                    direction=kb_direction,
+                    face_anchor_x=face_anchor_x
+                )
+                clip_path = temp_kb
+
+            # Process clip (unified video and Ken Burns source)
+            cap = cv2.VideoCapture(clip_path)
+            if not cap.isOpened():
+                raise RuntimeError(f"Could not open source clip: {clip_path}")
+            clip_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            clip_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = float(cap.get(cv2.CAP_PROP_FPS))
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            orig_duration = frame_count / fps if fps > 0 else 0.0
+            cap.release()
+            
+            has_audio = (not is_image) and self._check_has_audio(clip_path) and keep_original_audio
+            
+            # Silence detection
+            intervals = []
+            if has_audio:
+                non_silent_intervals, _ = self._detect_non_silent_intervals(clip_path)
+                if non_silent_intervals:
+                    for ns_start, ns_end in non_silent_intervals:
+                        s = max(start_in, ns_start)
+                        e = min(end_in, ns_end)
+                        if e > s + 0.1:
+                            intervals.append((s, e))
+                            
+            if not intervals:
+                intervals = [(start_in, min(end_in, orig_duration))]
+
+            # Normalization and ducking volume factors
+            norm_gain = self._get_audio_normalization_gain(clip_path) if has_audio else 1.0
+            duck_gain = self.ORIGINAL_AUDIO_VOLUME if music_active else 1.0
+            final_audio_gain = norm_gain * duck_gain
+
+            # Horizontal crop centering using face_anchor_x (with Haar cascade fallback)
+            face_x = face_anchor_x
+            if face_anchor_x == 0.5:
+                mid_time = (start_in + end_in) / 2
+                frame_rgb = self._get_video_frame_at_time(clip_path, mid_time)
+                if frame_rgb is not None:
+                    face_center = detect_face_center(frame_rgb)
+                    if face_center:
+                        face_x = face_center[0]
+                        logger.info(f"Smart Cropping Fallback: Haar face detected at x={face_x:.2f}")
+
+            scale = max(target_w / clip_w, target_h / clip_h)
+            new_w, new_h = int(clip_w * scale), int(clip_h * scale)
+            
+            crop_center_x = face_x * new_w
+            x1 = max(0, min(new_w - target_w, int(crop_center_x - target_w / 2)))
+            y1 = (new_h - target_h) // 2
+            
+            logger.info(f"Smart Cropping: Using anchor x={face_x:.2f}. Anchoring crop box horizontally to {x1}.")
+
+            ffmpeg_inputs = [("-i", clip_path)]
+            
+            effect_input_idx = -1
+            if effect_path and os.path.exists(effect_path):
+                effect_input_idx = len(ffmpeg_inputs)
+                ffmpeg_inputs.append(("-i", effect_path))
+                
+            sticker_input_idx = -1
+            if sticker_path and os.path.exists(sticker_path):
+                sticker_input_idx = len(ffmpeg_inputs)
+                if sticker_path.lower().endswith(".gif"):
+                    ffmpeg_inputs.append(("-ignore_loop 0 -i", sticker_path))
+                else:
+                    ffmpeg_inputs.append(("-i", sticker_path))
+
+            # Build FFmpeg filters
+            filter_complex_parts = []
+            video_output_names = []
+            audio_output_names = []
+            
+            speed = self.PACING_SPEED.get(pacing, 1.0)
+            if speed <= 0:
+                speed = 1.0
+                
+            for idx, (s, e) in enumerate(intervals):
+                v_name = f"v{idx}"
+                a_name = f"a{idx}"
+                
+                if speed != 1.0:
+                    filter_complex_parts.append(
+                        f"[0:v]trim=start={s}:end={e},setpts=(PTS-STARTPTS)/{speed:.2f},scale={new_w}:{new_h},crop={target_w}:{target_h}:{x1}:{y1}[{v_name}]"
+                    )
+                    if has_audio:
+                        filter_complex_parts.append(
+                            f"[0:a]atrim=start={s}:end={e},asetpts=PTS-STARTPTS,atempo={speed:.2f}[{a_name}]"
+                        )
+                    else:
+                        dur = (e - s) / speed
+                        filter_complex_parts.append(
+                            f"aevalsrc=0:d={dur:.3f},asetpts=PTS-STARTPTS[{a_name}]"
+                        )
+                else:
+                    filter_complex_parts.append(
+                        f"[0:v]trim=start={s}:end={e},setpts=PTS-STARTPTS,scale={new_w}:{new_h},crop={target_w}:{target_h}:{x1}:{y1}[{v_name}]"
+                    )
+                    if has_audio:
+                        filter_complex_parts.append(
+                            f"[0:a]atrim=start={s}:end={e},asetpts=PTS-STARTPTS[{a_name}]"
+                        )
+                    else:
+                        dur = e - s
+                        filter_complex_parts.append(
+                            f"aevalsrc=0:d={dur},asetpts=PTS-STARTPTS[{a_name}]"
+                        )
+                    
+                video_output_names.append(f"[{v_name}]")
+                audio_output_names.append(f"[{a_name}]")
+                
+            num_segments = len(intervals)
+            concat_in = "".join(v + a for v, a in zip(video_output_names, audio_output_names))
+            filter_complex_parts.append(
+                f"{concat_in}concat=n={num_segments}:v=1:a=1[v_concat][a_concat]"
             )
             
-            # Add silent audio track for concatenation consistency
-            temp_with_audio = temp_path.replace(".mp4", "_audio.mp4")
-            cmd = [
-                "ffmpeg", "-y",
-                "-i", temp_path,
-                "-f", "lavfi",
-                "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-                "-c:v", "copy",
+            filter_complex_parts.append(
+                f"[a_concat]volume={final_audio_gain}[a_final]"
+            )
+            
+            video_proc_in = "[v_concat]"
+            
+            # Apply transitions (zoom_in / zoom_out)
+            if transition == "zoom_in":
+                filter_complex_parts.append(
+                    f"{video_proc_in}zoompan=z='1+0.04*on/30':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={target_w}x{target_h}[v_zoom]"
+                )
+                video_proc_in = "[v_zoom]"
+            elif transition == "zoom_out":
+                filter_complex_parts.append(
+                    f"{video_proc_in}zoompan=z='1.1-0.04*on/30':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={target_w}x{target_h}[v_zoom]"
+                )
+                video_proc_in = "[v_zoom]"
+                
+            # Apply text overlay
+            if text_overlay:
+                if dynamic_style:
+                    style_cfg = dynamic_style.get("text_overlay_style") or dynamic_style
+                else:
+                    style_name = AGENTS_CONFIG.get("subtitle_agent", {}).get("caption_style", "hormozi")
+                    style_cfg = AGENTS_CONFIG.get("caption_styles", {}).get(style_name, {})
+                    
+                font_name = style_cfg.get("font_name", "Arial")
+                font_color = style_cfg.get("font_color", "white")
+                font_size = style_cfg.get("font_size", 70)
+                font_weight = style_cfg.get("font_weight", 700)
+                if not dynamic_style and font_size < 50:
+                    font_size = 70
+                    
+                outline_color = style_cfg.get("outline_color", "black")
+                outline_width = style_cfg.get("outline_width", 2)
+                if outline_color == "none":
+                    outline_width = 0
+
+                font_path = self._find_font(font_name, font_weight)
+                escaped_text = self._escape_drawtext(text_overlay)
+                font_path_escaped = font_path.replace("\\", "/").replace(":", "\\:")
+                
+                drawtext_parts = [
+                    f"drawtext=fontfile='{font_path_escaped}'",
+                    f"text='{escaped_text}'",
+                    f"fontsize={font_size}",
+                    f"fontcolor={font_color}",
+                    "x=(w-text_w)/2",
+                    "y=h*0.15"
+                ]
+                
+                # Handle shadow option dynamically
+                cfg_has_shadow = style_cfg.get("has_shadow", True)
+                shadow_color = style_cfg.get("shadow_color", "none")
+                shadow_width = style_cfg.get("shadow_width", 0)
+                if cfg_has_shadow and shadow_color != "none" and shadow_width > 0:
+                    drawtext_parts.append(f"shadowx={shadow_width}")
+                    drawtext_parts.append(f"shadowy={shadow_width}")
+                    drawtext_parts.append(f"shadowcolor={shadow_color}")
+
+                if outline_width > 0:
+                    drawtext_parts.append(f"borderw={outline_width}")
+                    drawtext_parts.append(f"bordercolor={outline_color}")
+                    
+                filter_complex_parts.append(
+                    f"{video_proc_in}{':'.join(drawtext_parts)}[v_text]"
+                )
+                video_proc_in = "[v_text]"
+                
+            # Apply visual effect loop overlay if present
+            if effect_input_idx > 0:
+                filter_complex_parts.append(
+                    f"[{effect_input_idx}:v]scale={target_w}:{target_h},loop=loop=-1:size=32767:start=0[v_effect_scaled]"
+                )
+                filter_complex_parts.append(
+                    f"{video_proc_in}[v_effect_scaled]blend=all_mode=screen:all_opacity=0.7[v_effect_applied]"
+                )
+                video_proc_in = "[v_effect_applied]"
+                
+            # Apply sticker overlay if present
+            if sticker_input_idx > 0:
+                sticker_w = int(target_w * 0.30)
+                filter_complex_parts.append(
+                    f"[{sticker_input_idx}:v]scale={sticker_w}:-1[v_sticker_scaled]"
+                )
+                pos_map = {
+                    "center": ("(W-w)/2", "(H-h)/2"),
+                    "top-left": ("50", "120"),
+                    "top-right": ("W-w-50", "120"),
+                    "bottom-left": ("50", "H-h-320"),
+                    "bottom-right": ("W-w-50", "H-h-320"),
+                    "bottom-center": ("(W-w)/2", "H-h-320"),
+                }
+                x_expr, y_expr = pos_map.get(sticker_position, pos_map["bottom-center"])
+                filter_complex_parts.append(
+                    f"{video_proc_in}[v_sticker_scaled]overlay=x='{x_expr}':y='{y_expr}'[v_sticker_applied]"
+                )
+                video_proc_in = "[v_sticker_applied]"
+
+            filter_complex_parts.append(
+                f"{video_proc_in}copy[v_final]"
+            )
+            
+            filter_complex_str = ";".join(filter_complex_parts)
+            
+            total_intervals_duration = sum(e - s for s, e in intervals) / speed
+            output_duration = target_duration if (target_duration > 0 and target_duration < total_intervals_duration) else total_intervals_duration
+            
+            cmd = ["ffmpeg", "-y"]
+            for arg_prefix, path in ffmpeg_inputs:
+                if "ignore_loop" in arg_prefix:
+                    cmd.extend(["-ignore_loop", "0", "-i", path])
+                else:
+                    cmd.extend(["-i", path])
+                    
+            cmd.extend([
+                "-filter_complex", filter_complex_str,
+                "-map", "[v_final]",
+                "-map", "[a_final]",
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
                 "-c:a", "aac",
-                "-shortest",
-                temp_with_audio
-            ]
-            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            os.replace(temp_with_audio, temp_path)
-            return duration
-
-        # For video:
-        cap = cv2.VideoCapture(clip_path)
-        if not cap.isOpened():
-            raise RuntimeError(f"Could not open source clip: {clip_path}")
-        clip_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        clip_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fps = float(cap.get(cv2.CAP_PROP_FPS))
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        orig_duration = frame_count / fps if fps > 0 else 0.0
-        cap.release()
-        
-        has_audio = self._check_has_audio(clip_path) and keep_original_audio
-        
-        # Silence detection
-        intervals = []
-        if has_audio:
-            non_silent_intervals, _ = self._detect_non_silent_intervals(clip_path)
-            if non_silent_intervals:
-                for ns_start, ns_end in non_silent_intervals:
-                    s = max(start_in, ns_start)
-                    e = min(end_in, ns_end)
-                    if e > s + 0.1:
-                        intervals.append((s, e))
-                        
-        if not intervals:
-            intervals = [(start_in, min(end_in, orig_duration))]
-
-        # Normalization and ducking volume factors
-        norm_gain = self._get_audio_normalization_gain(clip_path) if has_audio else 1.0
-        duck_gain = self.ORIGINAL_AUDIO_VOLUME if music_active else 1.0
-        final_audio_gain = norm_gain * duck_gain
-
-        # Horizontal crop centering using face_anchor_x (with Haar cascade fallback)
-        face_x = face_anchor_x
-        if face_anchor_x == 0.5:
-            mid_time = (start_in + end_in) / 2
-            frame_rgb = self._get_video_frame_at_time(clip_path, mid_time)
-            if frame_rgb is not None:
-                face_center = detect_face_center(frame_rgb)
-                if face_center:
-                    face_x = face_center[0]
-                    logger.info(f"Smart Cropping Fallback: Haar face detected at x={face_x:.2f}")
-
-        scale = max(target_w / clip_w, target_h / clip_h)
-        new_w, new_h = int(clip_w * scale), int(clip_h * scale)
-        
-        crop_center_x = face_x * new_w
-        x1 = max(0, min(new_w - target_w, int(crop_center_x - target_w / 2)))
-        y1 = (new_h - target_h) // 2
-        
-        logger.info(f"Smart Cropping: Using anchor x={face_x:.2f}. Anchoring crop box horizontally to {x1}.")
-
-        # Build FFmpeg filters
-        filter_complex_parts = []
-        video_output_names = []
-        audio_output_names = []
-        
-        speed = self.PACING_SPEED.get(pacing, 1.0)
-        if speed <= 0:
-            speed = 1.0
+                "-t", f"{output_duration:.3f}",
+                temp_path
+            ])
             
-        for idx, (s, e) in enumerate(intervals):
-            v_name = f"v{idx}"
-            a_name = f"a{idx}"
-            
-            if speed != 1.0:
-                filter_complex_parts.append(
-                    f"[0:v]trim=start={s}:end={e},setpts=(PTS-STARTPTS)/{speed:.2f},scale={new_w}:{new_h},crop={target_w}:{target_h}:{x1}:{y1}[{v_name}]"
-                )
-                if has_audio:
-                    filter_complex_parts.append(
-                        f"[0:a]atrim=start={s}:end={e},asetpts=PTS-STARTPTS,atempo={speed:.2f}[{a_name}]"
-                    )
-                else:
-                    dur = (e - s) / speed
-                    filter_complex_parts.append(
-                        f"aevalsrc=0:d={dur:.3f},asetpts=PTS-STARTPTS[{a_name}]"
-                    )
-            else:
-                filter_complex_parts.append(
-                    f"[0:v]trim=start={s}:end={e},setpts=PTS-STARTPTS,scale={new_w}:{new_h},crop={target_w}:{target_h}:{x1}:{y1}[{v_name}]"
-                )
-                if has_audio:
-                    filter_complex_parts.append(
-                        f"[0:a]atrim=start={s}:end={e},asetpts=PTS-STARTPTS[{a_name}]"
-                    )
-                else:
-                    dur = e - s
-                    filter_complex_parts.append(
-                        f"aevalsrc=0:d={dur},asetpts=PTS-STARTPTS[{a_name}]"
-                    )
+            logger.info(f"Running FFmpeg clip process command: {' '.join(cmd)}")
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if result.returncode != 0:
+                logger.error(f"FFmpeg clip process failed for {clip_path}")
+                logger.error(f"FFmpeg stderr: {result.stderr}")
+                raise RuntimeError(f"FFmpeg clip process failed: {result.stderr}")
                 
-            video_output_names.append(f"[{v_name}]")
-            audio_output_names.append(f"[{a_name}]")
-            
-        num_segments = len(intervals)
-        concat_in = "".join(v + a for v, a in zip(video_output_names, audio_output_names))
-        filter_complex_parts.append(
-            f"{concat_in}concat=n={num_segments}:v=1:a=1[v_concat][a_concat]"
-        )
-        
-        filter_complex_parts.append(
-            f"[a_concat]volume={final_audio_gain}[a_final]"
-        )
-        
-        video_proc_in = "[v_concat]"
-        
-        # Apply transitions (zoom_in / zoom_out)
-        if transition == "zoom_in":
-            filter_complex_parts.append(
-                f"{video_proc_in}zoompan=z='1+0.04*on/30':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={target_w}x{target_h}[v_zoom]"
-            )
-            video_proc_in = "[v_zoom]"
-        elif transition == "zoom_out":
-            filter_complex_parts.append(
-                f"{video_proc_in}zoompan=z='1.1-0.04*on/30':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={target_w}x{target_h}[v_zoom]"
-            )
-            video_proc_in = "[v_zoom]"
-            
-        # Apply text overlay
-        if text_overlay:
-            if dynamic_style:
-                style_cfg = dynamic_style.get("text_overlay_style") or dynamic_style
-            else:
-                style_name = AGENTS_CONFIG.get("subtitle_agent", {}).get("caption_style", "hormozi")
-                style_cfg = AGENTS_CONFIG.get("caption_styles", {}).get(style_name, {})
-                
-            font_name = style_cfg.get("font_name", "Arial")
-            font_color = style_cfg.get("font_color", "white")
-            font_size = style_cfg.get("font_size", 70)
-            font_weight = style_cfg.get("font_weight", 700)
-            if not dynamic_style and font_size < 50:
-                font_size = 70
-                
-            outline_color = style_cfg.get("outline_color", "black")
-            outline_width = style_cfg.get("outline_width", 2)
-            if outline_color == "none":
-                outline_width = 0
+            return output_duration
 
-            font_path = self._find_font(font_name, font_weight)
-            escaped_text = self._escape_drawtext(text_overlay)
-            font_path_escaped = font_path.replace("\\", "/").replace(":", "\\:")
-            
-            drawtext_parts = [
-                f"drawtext=fontfile='{font_path_escaped}'",
-                f"text='{escaped_text}'",
-                f"fontsize={font_size}",
-                f"fontcolor={font_color}",
-                "x=(w-text_w)/2",
-                "y=h*0.15"
-            ]
-            
-            # Handle shadow option dynamically
-            cfg_has_shadow = style_cfg.get("has_shadow", True)
-            shadow_color = style_cfg.get("shadow_color", "none")
-            shadow_width = style_cfg.get("shadow_width", 0)
-            if cfg_has_shadow and shadow_color != "none" and shadow_width > 0:
-                drawtext_parts.append(f"shadowx={shadow_width}")
-                drawtext_parts.append(f"shadowy={shadow_width}")
-                drawtext_parts.append(f"shadowcolor={shadow_color}")
-
-            if outline_width > 0:
-                drawtext_parts.append(f"borderw={outline_width}")
-                drawtext_parts.append(f"bordercolor={outline_color}")
-                
-            filter_complex_parts.append(
-                f"{video_proc_in}{':'.join(drawtext_parts)}[v_text]"
-            )
-            video_proc_in = "[v_text]"
-            
-        filter_complex_parts.append(
-            f"{video_proc_in}copy[v_final]"
-        )
-        
-        filter_complex_str = ";".join(filter_complex_parts)
-        
-        total_intervals_duration = sum(e - s for s, e in intervals) / speed
-        output_duration = target_duration if (target_duration > 0 and target_duration < total_intervals_duration) else total_intervals_duration
-        
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", clip_path,
-            "-filter_complex", filter_complex_str,
-            "-map", "[v_final]",
-            "-map", "[a_final]",
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-t", f"{output_duration:.3f}",
-            temp_path
-        ]
-        
-        logger.info(f"Running FFmpeg clip process command: {' '.join(cmd)}")
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if result.returncode != 0:
-            logger.error(f"FFmpeg clip process failed for {clip_path}")
-            logger.error(f"FFmpeg stderr: {result.stderr}")
-            raise RuntimeError(f"FFmpeg clip process failed: {result.stderr}")
-            
-        return output_duration
+        finally:
+            if temp_kb and os.path.exists(temp_kb):
+                try:
+                    os.remove(temp_kb)
+                except Exception as e:
+                    logger.warning(f"Failed to remove temp_kb {temp_kb}: {e}")
 
     def _build_ffmpeg_concat(
         self,
@@ -962,7 +1010,10 @@ class VideoEditor:
                         temp_path=temp_clip_path,
                         face_anchor_x=face_anchor_x,
                         keep_original_audio=keep_aud,
-                        dynamic_style=dynamic_style
+                        dynamic_style=dynamic_style,
+                        sticker_path=item.get("sticker_path"),
+                        sticker_position=item.get("sticker_position", "bottom-center"),
+                        effect_path=item.get("effect_path")
                     )
                     
                     processed_temp_files.append(temp_clip_path)
