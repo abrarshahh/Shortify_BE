@@ -202,16 +202,37 @@ def validate_expected_render_duration(edl: EDLDocument, target_duration: float) 
         if _is_image_clip(item.clip_name):
             effective_duration = raw_duration
         else:
-            pacing = item.details.pacing_style.value
-            speed = VIDEO_EDITOR_PACING_SPEEDS.get(pacing, 1.0)
+            speed = 1.0
+            if item.speed_keyframes:
+                from backend_ai.effects.motion import get_average_speed_linear
+                speed = get_average_speed_linear(item.speed_keyframes)
+            elif item.speed_preset:
+                from backend_ai.effects.motion import SPEED_PRESETS, get_average_speed_linear
+                preset_keyframes = SPEED_PRESETS.get(item.speed_preset)
+                if preset_keyframes:
+                    speed = get_average_speed_linear(preset_keyframes)
+            else:
+                pacing = item.details.pacing_style.value
+                speed = VIDEO_EDITOR_PACING_SPEEDS.get(pacing, 1.0)
+                
             if speed <= 0:
                 speed = 1.0
             effective_duration = min(raw_duration, raw_duration / speed)
 
         transition = item.transition.value
-        if index > 0 and transition in {"crossfade", "fade", "slide_left", "slide_right"}:
+        overlap_transitions = {
+            "crossfade", "fade", "slide_left", "slide_right", 
+            "slide_up", "slide_down", "slide_push",
+            "wipe_left", "wipe_right", "wipe_up", "wipe_down",
+            "wipe_diagonal_tl", "wipe_diagonal_tr", "wipe_diagonal_bl", "wipe_diagonal_br",
+            "split_horizontal", "split_vertical", "iris", "iris_circle",
+            "diamond", "heart", "blinds_horizontal", "blinds_vertical",
+            "checkerboard", "clock_wipe", "zoom_in", "zoom_out", "glitch",
+            "pixelate", "spin", "ripple", "blur", "light_leak"
+        }
+        if index > 0 and transition in overlap_transitions:
             estimated_duration -= min(VIDEO_EDITOR_DEFAULT_FADE_DURATION, effective_duration / 2)
-        elif index > 0 and transition == "dip_to_black":
+        elif index > 0 and transition in ("dip_to_black", "fade_to_white"):
             estimated_duration += min(VIDEO_EDITOR_DEFAULT_FADE_DURATION, effective_duration / 2)
 
         estimated_duration += effective_duration

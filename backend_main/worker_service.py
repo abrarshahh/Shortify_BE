@@ -16,6 +16,12 @@ render_jobs: Dict[str, Dict[str, Any]] = {}
 # and don't overwhelm CPU/Memory resources with MoviePy/FFmpeg
 _executor = ThreadPoolExecutor(max_workers=1)
 
+class RenderCancelledError(Exception):
+    """Raised when a render job is cancelled by the user."""
+    pass
+
+active_futures: Dict[str, Any] = {}
+
 def update_job(project_id: str, updates: Dict[str, Any]):
     """Helper to update job state fields in a thread-safe manner and persist to DB."""
     if project_id not in render_jobs:
@@ -52,6 +58,7 @@ def _execute_render_task(
     target_duration: int,
     aspect_ratio: str,
     style: str,
+    caption_style: str = "hormozi",
 ):
     """
     Synchronous worker task running inside the ThreadPool thread.
@@ -66,6 +73,10 @@ def _execute_render_task(
     })
 
     def orchestrator_progress_callback(percentage: int, step: str):
+        job = render_jobs.get(project_id, {})
+        if job.get("is_cancelled"):
+            raise RenderCancelledError("Render task cancelled by user request.")
+
         logger.info(f"[{project_id}] Progress: {percentage}% | {step}")
         messages_map = {
             "Initializing pipeline...": "Launching Shortify AI engine orchestrator and loading resources.",
@@ -95,6 +106,7 @@ def _execute_render_task(
             "target_duration": target_duration,
             "aspect_ratio": aspect_ratio,
             "style": style or "general",
+            "caption_style": caption_style,
             "rhythm_data": {},
             "visual_data": [],
             "edl": {},
@@ -155,6 +167,24 @@ def _execute_render_task(
         })
         logger.info(f"[Worker] Job completed for project {project_id}")
 
+    except RenderCancelledError as e:
+        logger.info(f"[Worker] Job for project {project_id} was cancelled by user.")
+        update_job(project_id, {
+            "status": "cancelled",
+            "progress_percentage": 0,
+            "current_step": "Cancelled",
+            "message": str(e),
+            "skipped_clips": []
+        })
+        # Clean up export directory if partial renders exist
+        export_dir = STORAGE_ROOT / "exports" / project_id
+        if export_dir.exists() and export_dir.is_dir():
+            import shutil
+            try:
+                shutil.rmtree(export_dir)
+                logger.info(f"[Worker] Cleaned up export directory for cancelled job: {export_dir}")
+            except Exception as cleanup_err:
+                logger.warning(f"[Worker] Failed to clean up cancelled job export dir: {cleanup_err}")
     except EDLGenerationError as e:
         logger.error(f"[Worker] EDL generation failed for project {project_id}: {e}")
         update_job(project_id, {
@@ -174,6 +204,7 @@ def _execute_render_task(
             "skipped_clips": []
         })
     finally:
+        active_futures.pop(project_id, None)
         # Always reset rendering flag in DB
         db = SessionLocal()
         try:
@@ -185,6 +216,36 @@ def _execute_render_task(
         finally:
             db.close()
 
+def cancel_job(project_id: str) -> bool:
+    """
+    Requests cancellation of a queued or running render job.
+    Returns True if the job was found and cancellation was requested, False otherwise.
+    """
+    # 1. Check if the future is in active_futures and can be cancelled before starting
+    future = active_futures.get(project_id)
+    if future:
+        cancelled = future.cancel()
+        if cancelled:
+            update_job(project_id, {
+                "status": "cancelled",
+                "progress_percentage": 0,
+                "current_step": "Cancelled",
+                "message": "Render task was cancelled before starting."
+            })
+            active_futures.pop(project_id, None)
+            return True
+
+    # 2. If it is already running, flag it for cooperative cancellation
+    job = render_jobs.get(project_id)
+    if job and job.get("status") in ("queued", "running"):
+        job["is_cancelled"] = True
+        job["status"] = "cancelled"
+        job["current_step"] = "Cancelling..."
+        job["message"] = "Render task cancellation requested by user."
+        return True
+
+    return False
+
 def enqueue_job(
     project_id: str,
     prompt: str,
@@ -194,6 +255,7 @@ def enqueue_job(
     target_duration: int,
     aspect_ratio: str,
     style: str,
+    caption_style: str = "hormozi",
 ):
     """Enqueues a rendering task into the thread pool."""
     update_job(project_id, {
@@ -203,7 +265,7 @@ def enqueue_job(
         "message": "Waiting for worker thread."
     })
     
-    _executor.submit(
+    future = _executor.submit(
         _execute_render_task,
         project_id=project_id,
         prompt=prompt,
@@ -213,4 +275,6 @@ def enqueue_job(
         target_duration=target_duration,
         aspect_ratio=aspect_ratio,
         style=style,
+        caption_style=caption_style,
     )
+    active_futures[project_id] = future

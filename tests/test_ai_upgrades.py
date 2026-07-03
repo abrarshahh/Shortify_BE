@@ -62,40 +62,26 @@ def test_clip_scoring_metrics(tmp_path, monkeypatch):
     assert scores["composite_score"] > 0.0
 
 
-def test_director_schema_fallback(monkeypatch):
-    monkeypatch.setenv("GROQ_API_KEY", "fake_key")
+def test_director_gemini_calling(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
 
-    calls = []
+    class MockResponse:
+        def __init__(self, text):
+            self.text = text
 
-    class MockCompletions:
-        def create(self, model, messages, response_format=None):
-            calls.append(response_format)
-            if response_format.get("type") == "json_schema":
-                # Simulate a 400 error for models that don't support JSON schema
-                raise Exception("BadRequestError: 400 json_schema is not supported")
-            
-            # Return a valid mock response on fallback
-            class MockMessage:
-                content = "{}"
-            class MockChoice:
-                message = MockMessage()
-            class MockResponse:
-                choices = [MockChoice()]
-            return MockResponse()
+    class MockModels:
+        def generate_content(self, model, contents, config=None):
+            return MockResponse('{"title": "Gemini EDL", "storyline": "Cool storyline", "total_duration": 10.0, "music_start_offset": 0.0, "timeline": []}')
 
-    class MockGroq:
-        def __init__(self, api_key):
-            self.chat = type("Chat", (), {"completions": MockCompletions()})()
+    class MockClient:
+        models = MockModels()
 
-    monkeypatch.setattr("backend_ai.agents.director_agent.Groq", MockGroq)
+    import backend_ai.agents.director_agent as da
+    monkeypatch.setattr(da, "get_gemini_client", lambda: MockClient())
 
     director = CreativeDirector()
-    director._call_groq(messages=[], model_id="llama3-some-model")
-
-    # First call had json_schema, second call had json_object
-    assert len(calls) == 2
-    assert calls[0]["type"] == "json_schema"
-    assert calls[1]["type"] == "json_object"
+    res = director._call_gemini(model_id="gemini-2.5-flash", messages=[{"role": "user", "content": "hello"}])
+    assert "Gemini EDL" in res.choices[0].message.content
 
 
 def test_orchestrator_apply_hook_corrections():
@@ -578,12 +564,12 @@ def test_font_downloader_and_validation(tmp_path, monkeypatch):
 
 def test_dynamic_aesthetic_styling_generation(monkeypatch):
     from backend_ai.agents.subtitle_agent import SubtitleAgent
+    import backend_ai.agents.subtitle_agent as sa
     
     agent = SubtitleAgent()
     
-    # Mock Groq client and completion response
-    class MockChatCompletionChoiceMessage:
-        content = """
+    class MockResponse:
+        text = """
         {
           "requires_subtitles": true,
           "subtitle_style": {
@@ -617,25 +603,14 @@ def test_dynamic_aesthetic_styling_generation(monkeypatch):
         }
         """
         
-    class MockChatCompletionChoice:
-        message = MockChatCompletionChoiceMessage()
-        
-    class MockChatCompletion:
-        choices = [MockChatCompletionChoice()]
-        
-    class MockChatCompletions:
-        def create(self, *args, **kwargs):
-            return MockChatCompletion()
+    class MockModels:
+        def generate_content(self, *args, **kwargs):
+            return MockResponse()
             
-    class MockChat:
-        completions = MockChatCompletions()
-        
-    class MockGroq:
-        def __init__(self, api_key):
-            self.chat = MockChat()
+    class MockClient:
+        models = MockModels()
             
-    monkeypatch.setenv("GROQ_API_KEY", "mock_key")
-    monkeypatch.setattr("groq.Groq", MockGroq)
+    monkeypatch.setattr("backend_ai.core.api_utils.get_gemini_client", lambda: MockClient())
     
     # Verify generate_aesthetic_style correctly calls and parses dynamic settings
     style = agent.generate_aesthetic_style(
@@ -914,7 +889,7 @@ def test_dynamic_stickers_and_effects(monkeypatch):
     
     # 3. Assert sticker sizing and top-right positioning filters are mapped
     assert "[2:v]scale=324:-1" in filter_complex_arg
-    assert "overlay=x='W-w-50':y='120'" in filter_complex_arg
+    assert "overlay=x='W-w-50':y='120':shortest=1" in filter_complex_arg
 
 
 def test_orchestrator_dynamic_subtitle_requires_logic(monkeypatch):
@@ -923,7 +898,7 @@ def test_orchestrator_dynamic_subtitle_requires_logic(monkeypatch):
     orchestrator = ShortifyOrchestrator()
     
     # Mock subtitle_agent.transcribe and burn_subtitles and os.path.exists and shutil.copy
-    monkeypatch.setattr(orchestrator.subtitle_agent, "transcribe", lambda path: {"captions": [{"text": "Hello", "start": 0.0, "end": 1.0}]})
+    monkeypatch.setattr(orchestrator.subtitle_agent, "transcribe", lambda path, style_name=None: {"captions": [{"text": "Hello", "start": 0.0, "end": 1.0}]})
     
     burn_called_with = None
     def mock_burn_subtitles(video_path, captions, output_path, style):

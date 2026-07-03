@@ -20,6 +20,7 @@ class Project(Base):
     target_duration = Column(Integer, nullable=False)  # seconds
     aspect_ratio = Column(String, nullable=False, default="9:16")
     style = Column(String, nullable=True)
+    caption_style = Column(String, nullable=True, default="hormozi")
     music_id = Column(PG_UUID(as_uuid=True), ForeignKey("media_assets.id"), nullable=True)  # FK to MediaAsset
     last_output_path = Column(String, nullable=True) # Path to the last generated video
     is_rendering = Column(Boolean, default=False)

@@ -280,6 +280,7 @@ class ColorGradingAgent:
         cmd = [
             self.ffmpeg_path,
             "-y",                        # overwrite output without asking
+            "-nostdin",
             "-i", video_path,            # input
             "-vf", filter_chain,         # video filter chain
             "-c:v", "libx264",           # re-encode video with H.264
@@ -294,7 +295,8 @@ class ColorGradingAgent:
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True,
+                stdin=subprocess.DEVNULL
             )
         except FileNotFoundError:
             raise RuntimeError(

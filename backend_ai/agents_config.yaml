@@ -13,12 +13,13 @@ media_analyst:
     - "gemini-flash-lite-latest"
 
 creative_director:
-  provider: "groq"
-  model: "llama-3.3-70b-versatile"
+  provider: "google"
+  model: "gemini-2.5-flash"
   ollama_timeout_seconds: 60
   fallback_models:
-    - "deepseek-r1:8b"
-    - "llama3.2-vision:latest"
+    - "gemini-2.5-pro"
+    - "gemini-1.5-pro"
+    - "gemini-1.5-flash"
 
 subtitle_agent:
   provider: "openai-whisper" # Local whisper

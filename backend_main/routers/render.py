@@ -72,15 +72,31 @@ def trigger_render(
     project.is_rendering = True
     db.commit()
 
+    # Build a combined creative brief so all AI stages receive the full
+    # project context, not just the one-line per-render prompt.
+    project_context_parts = []
+    if project.title:
+        project_context_parts.append(f"Project Title: {project.title}")
+    if project.description:
+        project_context_parts.append(f"Project Description: {project.description}")
+    project_context_parts.append(f"Project Style: {project.style or 'general'}")
+    project_context_parts.append(f"Aspect Ratio: {project.aspect_ratio or '9:16'}")
+    project_context_parts.append(f"Caption Style: {project.caption_style or 'hormozi'}")
+    project_context_parts.append(f"Target Duration: {project.target_duration} seconds")
+    if body.prompt:
+        project_context_parts.append(f"Render Instruction: {body.prompt}")
+    enriched_prompt = "\n".join(project_context_parts)
+
     worker_service.enqueue_job(
         project_id=str(project_id),
-        prompt=body.prompt,
+        prompt=enriched_prompt,
         video_paths=video_paths,
         music_path=music_path,
         output_filename=body.output_filename,
         target_duration=project.target_duration,
         aspect_ratio=project.aspect_ratio,
         style=project.style,
+        caption_style=project.caption_style or "hormozi",
     )
 
     return RenderResponse(
@@ -141,6 +157,35 @@ def get_render_status(
         current_step=job.get("current_step", "Initializing..."),
         skipped_clips=job.get("skipped_clips", [])
     )
+
+@router.delete("/{project_id}/render", status_code=200)
+def cancel_render(
+    project_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(lambda: SessionLocal()),
+):
+    """
+    Cancels a running or queued render job for the project.
+    """
+    project = db.query(Project).filter(Project.id == project_id).first()
+    if not project:
+        raise HTTPException(404, "Project not found")
+    if project.user_id != user.id:
+        raise HTTPException(403, "Forbidden")
+
+    # Request cancellation of the job in worker_service
+    worker_service.cancel_job(str(project_id))
+
+    # Reset rendering flag in DB immediately to prevent locking
+    project.is_rendering = False
+    db.commit()
+
+    return {
+        "project_id": str(project_id),
+        "status": "cancelled",
+        "message": "Render job cancellation requested successfully."
+    }
+
 
 @router.get("/outputs", response_model=List[OutputVideoResponse])
 def list_output_videos(

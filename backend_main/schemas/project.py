@@ -11,6 +11,7 @@ class ProjectCreate(BaseModel):
     target_duration: DurationEnum
     aspect_ratio: AspectRatioEnum = AspectRatioEnum.nine_sixteen
     style: Optional[StyleEnum] = None
+    caption_style: Optional[str] = "hormozi"
 
 class ProjectResponse(BaseModel):
     id: uuid.UUID
@@ -19,6 +20,7 @@ class ProjectResponse(BaseModel):
     target_duration: int
     aspect_ratio: str
     style: Optional[str]
+    caption_style: Optional[str]
     music_id: Optional[uuid.UUID]
     created_at: datetime
 
@@ -32,5 +34,6 @@ class ProjectListItem(BaseModel):
     target_duration: int
     aspect_ratio: str
     style: Optional[str]
+    caption_style: Optional[str]
     created_at: Optional[datetime]
     render_status: str  # not_started | running | done | error

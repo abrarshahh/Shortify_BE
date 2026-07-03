@@ -1,11 +1,12 @@
 import os
 import json
+import re
 import logging
 import urllib.request
 import urllib.error
 import socket
 from typing import List, Dict, Any, Optional
-from groq import Groq
+from backend_ai.core.api_utils import get_gemini_client
 from dotenv import load_dotenv
 from backend_ai.core.config_loader import AGENTS_CONFIG
 from backend_ai.core.api_utils import rate_limit_guard
@@ -35,9 +36,71 @@ EDL_JSON_SCHEMA = {
                     "transition": {
                         "type": "string",
                         "enum": [
-                            "none", "jump_cut", "crossfade", "dip_to_black",
-                            "slide_left", "slide_right", "zoom_in", "zoom_out", "glitch"
+                            "none", "jump_cut", "fade", "crossfade", "dip_to_black", "fade_to_white",
+                            "slide_left", "slide_right", "slide_up", "slide_down", "slide_push",
+                            "wipe_left", "wipe_right", "wipe_up", "wipe_down",
+                            "wipe_diagonal_tl", "wipe_diagonal_tr", "wipe_diagonal_bl", "wipe_diagonal_br",
+                            "split_horizontal", "split_vertical", "iris", "iris_circle",
+                            "diamond", "heart", "blinds_horizontal", "blinds_vertical",
+                            "checkerboard", "clock_wipe", "zoom_in", "zoom_out", "glitch",
+                            "pixelate", "spin", "ripple", "blur", "light_leak"
                         ]
+                    },
+                    "transition_params": {
+                        "type": "object",
+                        "additionalProperties": True
+                    },
+                    "color_grade": {
+                        "type": "object",
+                        "properties": {
+                            "brightness": {"type": "number", "minimum": 0.5, "maximum": 1.8},
+                            "contrast": {"type": "number", "minimum": 0.5, "maximum": 2.0},
+                            "gamma": {"type": "number", "minimum": 0.1, "maximum": 10.0},
+                            "saturation": {"type": "number", "minimum": 0.0, "maximum": 2.0},
+                            "vibrance": {"type": "number", "minimum": 0.0, "maximum": 2.0},
+                            "hue": {"type": "number", "minimum": -180.0, "maximum": 180.0},
+                            "temperature": {"type": "number", "minimum": -50.0, "maximum": 50.0},
+                            "vignette_strength": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                            "vignette_radius": {"type": "number", "minimum": 0.0, "maximum": 2.0}
+                        },
+                        "additionalProperties": False
+                    },
+                    "audio_ducking": {
+                        "type": "object",
+                        "properties": {
+                            "original_audio_volume": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                            "music_volume_during_segment": {"type": "number", "minimum": 0.0, "maximum": 1.0}
+                        },
+                        "required": ["original_audio_volume", "music_volume_during_segment"],
+                        "additionalProperties": False
+                    },
+                    "speed_preset": {
+                        "type": "string",
+                        "enum": ["constant_fast", "constant_slow", "ramp_up", "ramp_down", "speed_bump", "freeze_frame"]
+                    },
+                    "speed_keyframes": {
+                        "type": "array",
+                        "items": {
+                            "type": "array",
+                            "items": {"type": "number"},
+                            "minItems": 2,
+                            "maxItems": 2
+                        }
+                    },
+                    "reverse": {"type": "boolean"},
+                    "stabilize": {"type": "boolean"},
+                    "stabilize_strength": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    "text_preset": {
+                        "type": "string",
+                        "enum": ["bold_hype", "classic_clean", "neon_glow", "minimal_pop"]
+                    },
+                    "text_animation": {
+                        "type": "string",
+                        "enum": ["none", "fade", "slide_up", "slide_down", "slide_left", "slide_right"]
+                    },
+                    "sticker_animation": {
+                        "type": "string",
+                        "enum": ["none", "fade", "slide_up", "slide_down", "slide_left", "slide_right"]
                     },
                     "text_overlay": {"type": "string"},
                     "details": {
@@ -80,15 +143,38 @@ EDL_JSON_SCHEMA = {
 
 class CreativeDirector:
     def __init__(self):
-        api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            logger.warning("GROQ_API_KEY not found; Groq primary model will be skipped")
-        
         config = AGENTS_CONFIG.get("creative_director", {})
-        self.client = Groq(api_key=api_key) if api_key else None
-        self.model_id = config.get("model", "llama-3.3-70b-versatile")
-        self.fallback_models = config.get("fallback_models", ["deepseek-r1:8b", "llama3.2-vision:latest"])
+        self.client = None
+        self.gemini_client = get_gemini_client()
+        self.model_id = config.get("model", "gemini-2.5-flash")
+        self.fallback_models = config.get("fallback_models", ["gemini-2.5-pro", "gemini-1.5-pro", "gemini-1.5-flash"])
+        self.gemini_model = self.model_id
         self.ollama_timeout_seconds = int(config.get("ollama_timeout_seconds", 60))
+
+    def _clean_profanity(self, text: str) -> str:
+        if not isinstance(text, str):
+            return text
+        profanities = {
+            r"\bfuck(ing|er|ed|s)?\b": "[expletive]",
+            r"\bshit(s|ted|ting|head)?\b": "[expletive]",
+            r"\bass(hole)?s?\b": "[expletive]",
+            r"\bbitch(es)?\b": "[expletive]",
+            r"\bcrap\b": "[expletive]",
+            r"\bdamn\b": "[expletive]",
+        }
+        cleaned = text
+        for pattern, replacement in profanities.items():
+            cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
+        return cleaned
+
+    def _clean_nested_profanity(self, data: Any) -> Any:
+        if isinstance(data, str):
+            return self._clean_profanity(data)
+        elif isinstance(data, dict):
+            return {k: self._clean_nested_profanity(v) for k, v in data.items()}
+        elif isinstance(data, list):
+            return [self._clean_nested_profanity(x) for x in data]
+        return data
 
     def _normalize_pacing_style(self, pacing_style: Any) -> str:
         value = str(pacing_style or "jump-cut").strip().lower().replace("_", "-").replace(" ", "-")
@@ -104,12 +190,55 @@ class CreativeDirector:
         }
         return aliases.get(value, "jump-cut")
 
-    def _sanitize_edl(self, edl: Dict[str, Any]) -> Dict[str, Any]:
+    def _sanitize_edl(self, edl: Dict[str, Any], media_analyses: List[Dict[str, Any]]) -> Dict[str, Any]:
+        durations = {}
+        for analysis in media_analyses:
+            filename = analysis.get("file_metadata", {}).get("filename")
+            dur = analysis.get("file_metadata", {}).get("duration_seconds")
+            if filename and dur is not None:
+                durations[filename] = float(dur)
+
         timeline = edl.get("timeline", [])
         for item in timeline:
             details = item.get("details") or {}
             details["pacing_style"] = self._normalize_pacing_style(details.get("pacing_style"))
             item["details"] = details
+            
+            # Virtual segment duration & bounds auto-correction
+            clip_name = item.get("clip_name", "")
+            if ":" in clip_name:
+                parts = clip_name.split(":")
+                if len(parts) == 3:
+                    filename = parts[0]
+                    try:
+                        v_start = float(parts[1])
+                        v_end = float(parts[2])
+                        
+                        actual_dur = durations.get(filename)
+                        if actual_dur is not None:
+                            if v_end > actual_dur:
+                                v_end = actual_dur
+                                item["clip_name"] = f"{filename}:{v_start:.3f}:{v_end:.3f}"
+                        
+                        v_len = v_end - v_start
+                        
+                        start_in = float(item.get("start_in_clip", 0.0))
+                        end_in = float(item.get("end_in_clip", 0.0))
+                        
+                        if start_in >= v_start:
+                            start_in = start_in - v_start
+                        
+                        if end_in > v_len:
+                            end_in = end_in - v_start
+                            
+                        start_in = max(0.0, min(start_in, v_len))
+                        end_in = max(start_in + 0.1, min(end_in, v_len))
+                        
+                        item["start_in_clip"] = round(start_in, 3)
+                        item["end_in_clip"] = round(end_in, 3)
+                    except ValueError:
+                        pass
+
         edl["timeline"] = timeline
         return edl
 
@@ -184,11 +313,16 @@ class CreativeDirector:
             "total_duration": round(total, 3),
             "music_start_offset": 0.0,
             "timeline": timeline,
-        })
+        }, media_analyses)
 
     def _call_groq(self, messages: List[Dict[str, str]], model_id: str, use_schema: bool = True):
         if not self.client:
             raise RuntimeError("Groq client unavailable")
+        
+        # Certain models on Groq (like llama-3.3, mixtral) do not support json_schema
+        if any(m in model_id.lower() for m in ["llama-3.3", "mixtral"]):
+            use_schema = False
+
         if use_schema:
             try:
                 return self.client.chat.completions.create(
@@ -210,6 +344,34 @@ class CreativeDirector:
             messages=messages,
             response_format={"type": "json_object"}
         )
+
+    def _call_gemini(self, model_id: str, messages: List[Dict[str, str]]):
+        if not self.gemini_client:
+            raise RuntimeError("Gemini client unavailable")
+        
+        system_instructions = ""
+        user_content = ""
+        for msg in messages:
+            if msg["role"] == "system":
+                system_instructions += msg["content"] + "\n"
+            elif msg["role"] == "user":
+                user_content += msg["content"] + "\n"
+
+        from google.genai import types
+        response = self.gemini_client.models.generate_content(
+            model=model_id,
+            contents=user_content,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instructions,
+                response_mime_type="application/json"
+            )
+        )
+        
+        class _Response:
+            def __init__(self, content: str):
+                self.choices = [type("Choice", (), {"message": type("Message", (), {"content": content})()})()]
+
+        return _Response(response.text)
 
     def _call_ollama(self, model_id: str, messages: List[Dict[str, str]]):
         payload = {
@@ -282,16 +444,29 @@ class CreativeDirector:
                     "avg_brightness": m.get("avg_brightness", 128.0)
                 }
 
+        # Compute total input duration across all available assets
+        total_input_duration = 0.0
+        for analysis in media_analyses:
+            dur = analysis.get("file_metadata", {}).get("duration_seconds")
+            if isinstance(dur, (int, float)):
+                total_input_duration += dur
+
+        # Filter beats and drops to only those within the target duration + 5s.
+        # This keeps the rhythm context relevant to the edit and saves hundreds of tokens.
+        beats_filtered = [b for b in audio_analysis.get("beat_times", []) if b <= target_duration + 5.0]
+        drops_filtered = [d for d in audio_analysis.get("peak_times", []) if d <= target_duration + 5.0]
+
         # Prepare the context for the LLM
         context = {
             "user_intent": user_prompt,
             "target_duration": target_duration,
+            "total_input_duration": round(total_input_duration, 2),
             "aspect_ratio": aspect_ratio,
             "style": style,
             "audio_rhythm": {
                 "tempo": audio_analysis.get("tempo"),
-                "beats": audio_analysis.get("beat_times", [])[:100], 
-                "drops": audio_analysis.get("peak_times", [])[:100],
+                "beats": beats_filtered, 
+                "drops": drops_filtered,
                 "energy_segments": audio_analysis.get("energy_segments", []),
                 "audio_mood": audio_analysis.get("sentiment", {}).get("label")
             },
@@ -309,7 +484,59 @@ class CreativeDirector:
             cs_info = {}
             if clip_scores and filename in clip_scores:
                 cs_info = clip_scores[filename]
-                
+
+            # Sort highlights and segments by priority_score DESC
+            highlights_sorted = sorted(
+                analysis.get("interesting_segments", []),
+                key=lambda s: s.get("priority_score", 0),
+                reverse=True
+            )
+            segments_sorted = sorted(
+                analysis.get("all_segments", []),
+                key=lambda s: s.get("priority_score", 0),
+                reverse=True
+            )
+
+            # Truncate summary to save tokens
+            summary_raw = analysis.get("summary", "")
+            summary_clean = summary_raw[:120] + "..." if len(summary_raw) > 120 else summary_raw
+
+            # Simplify and limit highlights (top 4 DESC) to avoid rate limits
+            simplified_highlights = []
+            for seg in highlights_sorted[:4]:
+                desc = seg.get("description", "")
+                desc_clean = desc[:100] + "..." if len(desc) > 100 else desc
+                simplified_highlights.append({
+                    "start": seg.get("start"),
+                    "end": seg.get("end"),
+                    "description": desc_clean,
+                    "priority_score": seg.get("priority_score"),
+                    "relevance_score": seg.get("relevance_score"),
+                    "segment_focus": seg.get("segment_focus")
+                })
+
+            # Simplify and limit chronological segments (top 3 DESC) to avoid rate limits
+            simplified_segments = []
+            for seg in segments_sorted[:3]:
+                desc = seg.get("description", "")
+                desc_clean = desc[:100] + "..." if len(desc) > 100 else desc
+                simplified_segments.append({
+                    "start": seg.get("start"),
+                    "end": seg.get("end"),
+                    "description": desc_clean,
+                    "priority_score": seg.get("priority_score"),
+                    "relevance_score": seg.get("relevance_score"),
+                    "segment_focus": seg.get("segment_focus")
+                })
+
+            # Simplify audio context - remove huge raw captions arrays
+            audio_raw = analysis.get("audio", {})
+            captions_list = audio_raw.get("captions", [])
+            audio_info = {
+                "has_dialogue": len(captions_list) > 0,
+                "audio_mood": audio_raw.get("audio_mood", "Neutral")
+            }
+
             clip_info = {
                 "filename": filename,
                 "duration": analysis.get("file_metadata", {}).get("duration_seconds"),
@@ -319,9 +546,10 @@ class CreativeDirector:
                 "motion_score": cs_info.get("motion_score", 0.0),
                 "motion_tier": cs_info.get("motion_tier", "medium"),
                 "face_detected": cs_info.get("face_detected", False),
-                "summary": analysis.get("summary"),
-                "highlights": analysis.get("interesting_segments", []),
-                "segments": analysis.get("all_segments", [])
+                "summary": summary_clean,
+                "highlights": simplified_highlights,
+                "segments": simplified_segments,
+                "audio": audio_info
             }
             context["available_clips"].append(clip_info)
 
@@ -352,8 +580,29 @@ class CreativeDirector:
               "end_in_clip": float,
               "timeline_start": float,
               "timeline_end": float,
-              "transition": "none | jump_cut | crossfade | dip_to_black | slide_left | slide_right | zoom_in | zoom_out | glitch",
-                "text_overlay": "On-screen text (decide dynamically based on user prompt/style; leave empty if not appropriate)",
+                "transition": "none | jump_cut | fade | crossfade | dip_to_black | fade_to_white | slide_left | slide_right | slide_up | slide_down | slide_push | wipe_left | wipe_right | wipe_up | wipe_down | wipe_diagonal_tl | wipe_diagonal_tr | wipe_diagonal_bl | wipe_diagonal_br | split_horizontal | split_vertical | iris | iris_circle | diamond | heart | blinds_horizontal | blinds_vertical | checkerboard | clock_wipe | zoom_in | zoom_out | glitch | pixelate | spin | ripple | blur | light_leak",
+              "transition_params": {{
+                "num_bars": 15,
+                "intensity": 1.5
+              }},
+               "color_grade": {{
+                 "brightness": 1.1,
+                 "contrast": 1.05,
+                 "saturation": 0.9,
+                 "temperature": 10.0,
+                 "vignette_strength": 0.3
+               }},
+               "audio_ducking": {{
+                 "original_audio_volume": 0.8,
+                 "music_volume_during_segment": 0.1
+               }},
+              "speed_preset": "ramp_up",
+              "reverse": false,
+              "stabilize": true,
+              "text_preset": "bold_hype",
+              "text_animation": "slide_up",
+              "sticker_animation": "fade",
+              "text_overlay": "On-screen text (decide dynamically based on user prompt/style; leave empty if not appropriate)",
               "details": {{
                 "visual_cue": "Specific action to focus on",
                 "sound_design": "SFX (e.g., 'whoosh', 'bass drop')",
@@ -371,18 +620,46 @@ class CreativeDirector:
         
         RULES:
         - QUALITY PREFERENCE: Quality score is objective. Prefer clips with quality_score above 0.70 unless narrative requires otherwise. Never use clips with quality_score below 0.40 as the hook.
+        - FACE/PEOPLE PRIORITY: If user_intent contains first-person words ('me', 'us', 'we', 'I', 'myself', 'ourselves') or people references ('person', 'people', 'creator', 'athlete', 'speaker', 'friend', 'team', or any person's name):
+          - Clips where face_detected=True MUST be selected FIRST for every timeline slot.
+          - Clips where face_detected=False (pure B-roll, landscapes, objects) may ONLY be used when no face clip remains unused, or as a brief (max 2s) establishing/cutaway shot between face clips.
+          - NEVER open the video (hook slot, is_hook=true) with a clip where face_detected=False if ANY face-detected clip is available.
+          - When multiple face clips exist, rank them by relevance_score first, then by quality_score.
+        - INTELLIGENT REUSE POLICY: Decide whether to reuse clip segments dynamically based on available input footage (`total_input_duration`) versus the requested `target_duration`, the prompt, and overall video vibe.
+          - If the total combined duration of all available unique clips is close to or less than the target duration, you should reuse or loop high-quality clips/segments to meet the time requirement.
+          - Even when you have plenty of unique footage (e.g., 60s of footage for a 30s target video), you should STILL choose to reuse highly interesting, highly relevant segments (e.g., priority_score >= 8.5) if the remaining unused segments are uninteresting, low-scoring (priority_score < 7.0), or irrelevant. Never force yourself to use boring, low-scoring B-roll just for the sake of uniqueness.
+          - Minimize reuse of mediocre clips. If the prompt suggests a transition flow that repeats (e.g., flashing back to the hook or matching a repeated beat drop), reuse is encouraged.
+          - Avoid reusing identical segments consecutively unless aiming for a specific visual repeat/loop effect.
+        - ALWAYS USE HIGHEST PRIORITY FIRST: Within each clip's 'highlights' list, segments are sorted by priority_score from highest to lowest. Always start from the top of this list. Never pick a segment with a lower priority_score if a higher-priority segment from the same clip has not been used yet.
         - PACING CONSTRAINTS: Do not assign cinematic-slow pacing to high-motion clips (motion_tier == 'high'). Do not assign jump-cut pacing to static clips (motion_tier == 'static') unless the total reel style is speed-ramp or fast_cut.
-        - ORIGINAL AUDIO & DUCKING: Set 'keep_original_audio' to true if the clip contains dialogue, voices, or speaking parts that should be heard. This will play the clip's audio and duck the background music. Set it to false for clips that only contain background ambient noise, wind, silence, or where the raw audio is not useful. This will mute the clip's raw audio and keep the background music playing at full volume.
+        - ORIGINAL AUDIO & DUCKING (INTELLIGENT): You MUST determine the audio levels for each clip segment. Provide an "audio_ducking" object containing "original_audio_volume" (0.0 to 1.0) and "music_volume_during_segment" (0.0 to 1.0) for each timeline item:
+          - If a segment contains dialogue, voices, or spoken words (which you can detect from the clip's "audio" captions context), set 'keep_original_audio' to true, set "original_audio_volume" high (0.8 to 1.0), and duck the background music volume "music_volume_during_segment" low (0.05 to 0.10).
+          - If a segment is non-dialogue B-roll or contains only atmospheric noise (wind, rain, etc.) that you want to mix with the music, set 'keep_original_audio' to true, set "original_audio_volume" high (0.8 to 1.0) so it's clearly heard, and set "music_volume_during_segment" to a normal level (0.20 to 0.25).
+          - If the segment has no useful audio, set 'keep_original_audio' to false, set "original_audio_volume" to 0.0, and set "music_volume_during_segment" to a normal level (0.20 to 0.25).
+        - RELEVANCE PREFERENCE (STRICT): Each segment in 'highlights' and 'segments' has a 'relevance_score' between 0.0 and 1.0 indicating how well it matches the user's prompt. You MUST weight relevance_score over energy_score and priority_score. A clip segment that is highly relevant to the creative prompt (relevance_score >= 0.70) MUST be prioritized over an irrelevant segment, even if the irrelevant segment has a higher energy_score.
         - SEQUENTIAL ORDER: 'timeline_start' must strictly increase. No overlapping clips.
         - NO REPETITION: Avoid using the same clip twice in a row. Use different clips to maintain visual interest.
-        - USER INTENT IS SUPREME: You MUST follow the User Intent perfectly. If the user asks for a specific scene, action, or chronological order, you must provide it exactly as requested, even if the priority_score is lower.
+        - USER INTENT IS SUPREME: You MUST follow the User Intent perfectly. If the user asks for a specific scene, action, or chronological order, you must provide it exactly as requested, prioritizing matching segments (highest relevance_score).
         - SMART CLIP SELECTION (STRICT CASCADE LOGIC): You MUST select clips using this exact priority sequence:
           1. FIRST, only look at segments from the 'highlights' array.
-          2. FILTER by 'should_be_used': prioritize segments where 'should_be_used' is true, and further prioritize segments with higher 'local_score' (scored by our local ClipScoringAgent).
+          2. FILTER by prompt relevance: prioritize segments where 'relevance_score' is high (>= 0.70), and further prioritize segments with higher 'local_score' (scored by our local ClipScoringAgent).
           3. MATCH PACING STYLE: You MUST match the 'pacing_style' under 'details' based on the clip segment's 'motion_type' metric. High-motion segments ('motion_type' == 'high-motion' or motion_tier == 'high') MUST be assigned to 'speed-ramp' pacing; static segments ('motion_type' == 'static' or motion_tier == 'static') MUST be assigned to 'cinematic-slow' pacing.
           4. MATCH FOCUS: Ensure that the 'segment_focus' is consistent across the selected clips (e.g., if the main theme is 'mountain', try to pick other 'mountain' clips).
-          5. If you still need more duration to hit the target, fall back to the 'segments' array and apply the exact same logic (highest priority_score, should_be_used: true, matching focus).
-        - EXACT DURATION REQUIRED: The total expected render duration (sum of effective clip durations) MUST equal {target_duration} seconds. For each clip, its effective duration is: (end_in_clip - start_in_clip) / 1.5 if details.pacing_style is 'speed-ramp', and (end_in_clip - start_in_clip) otherwise. The sum of these effective durations must be exactly {target_duration} seconds.
+          5. If you still need more duration to hit the target, fall back to the 'segments' array and apply the exact same logic (highest relevance_score, then highest priority_score/local_score, matching focus).
+        - EXACT DURATION REQUIRED: The total expected render duration (sum of effective clip durations) MUST equal {target_duration} seconds.
+          For each clip, its speed is determined as:
+          - If `speed_preset` is set:
+            - "constant_fast" -> speed is 2.0 (effective duration = (end_in_clip - start_in_clip) / 2.0)
+            - "ramp_up" -> speed is 1.13 (effective duration = (end_in_clip - start_in_clip) / 1.13)
+            - "ramp_down" -> speed is 1.13 (effective duration = (end_in_clip - start_in_clip) / 1.13)
+            - "speed_bump" -> speed is 1.2 (effective duration = (end_in_clip - start_in_clip) / 1.2)
+            - "constant_slow" -> speed is 1.0 (effective duration = end_in_clip - start_in_clip)
+            - "freeze_frame" -> speed is 1.0 (effective duration = end_in_clip - start_in_clip)
+          - If `speed_preset` is NOT set:
+            - If details.pacing_style is 'speed-ramp' -> speed is 1.5 (effective duration = (end_in_clip - start_in_clip) / 1.5)
+            - Otherwise -> speed is 1.0 (effective duration = end_in_clip - start_in_clip)
+          The sum of these effective durations must be exactly {target_duration} seconds.
+          PREFER PACING STYLE OVER PRESETS: Unless the user prompt explicitly requests custom speed presets like constant fast/slow or ramping, do NOT set `speed_preset` or `speed_keyframes` (leave them empty or null). Just set details.pacing_style to 'speed-ramp' or 'cinematic-slow' and let the pacing speeds apply automatically. This keeps the duration calculations simple.
         - DURATION MATCH: Ensure 'timeline_end - timeline_start' is exactly equal to 'end_in_clip - start_in_clip' for each clip.
         - MUSIC SELECTION: Use 'music_start_offset' to pick a good starting point from the audio track (e.g., an energy segment).
         - DYNAMIC ELEMENTS & STYLES SELECTION: You MUST select and tailor transitions, pacing_style, text_overlay, effect_type, effect_query, sticker_query, and sticker_position dynamically based on the user's prompt and intention. Do not use generic defaults if the prompt indicates a specific vibe (e.g. if they ask for a 'scary video', use 'smoke'/'fog' effects, 'ghost'/'scared' stickers, and glitch/dip_to_black transitions; if a 'hype/gym video', use 'particles'/'sparks' effects, 'fire'/'subscribe' stickers, and fast_cut/speed-ramp pacing).
@@ -393,12 +670,53 @@ class CreativeDirector:
           - Set 'effect_type' to 'none' and leave queries empty ("") if they are not needed for a clip.
         - TRANSITIONS: Choose transitions deliberately based on style and narrative moment:
           - 'none' or 'jump_cut': default for fast_cut style, high energy sequences, beat-sync cuts. Never use crossfade on beat-sync cuts.
-          - 'crossfade': smooth scene changes, travel style, when two clips share similar mood or color.
-          - 'dip_to_black': dramatic scene breaks, time jumps, emotional pauses, cinematic style chapter markers.
-          - 'zoom_in': push into an action moment, build tension before a reveal.
-          - 'zoom_out': pull back after a climax, reveal scale or context.
-          - 'slide_left' or 'slide_right': travel style, geographic transitions, before/after comparisons.
-          - 'glitch': sparingly for fast_cut or dramatic style, maximum one or two times per reel.
+          - 'crossfade' or 'fade': smooth scene changes, travel style, when two clips share similar mood or color.
+          - 'dip_to_black' or 'fade_to_white': dramatic scene breaks, time jumps, emotional pauses, cinematic style chapter markers.
+          - 'zoom_in' or 'zoom_out': push into or pull back from an action moment.
+          - 'slide_left', 'slide_right', 'slide_up', 'slide_down', or 'slide_push': dynamic panning slides.
+          - 'wipe_left', 'wipe_right', 'wipe_up', 'wipe_down', 'wipe_diagonal_tl', 'wipe_diagonal_tr', 'wipe_diagonal_bl', or 'wipe_diagonal_br': screen wipes.
+          - 'split_horizontal' or 'split_vertical': split-screen reveals opening from the edges.
+          - 'iris', 'iris_circle', 'diamond', or 'heart': shaped reveals.
+          - 'blinds_horizontal', 'blinds_vertical', 'checkerboard', or 'clock_wipe': grid-based/radial reveals.
+          - 'glitch', 'pixelate', 'spin', 'ripple', 'blur', or 'light_leak': distortion/blur effects.
+          - PARAMETERS: You can dynamically tune transition variants using `"transition_params"`. For example:
+            - blinds: `{{"num_bars": int}}`
+            - checkerboard: `{{"grid_size": int}}`
+            - glitch: `{{"intensity": float}}`
+            - pixelate: `{{"max_cell_size": int}}`
+            - blur: `{{"max_blur_size": int}}`
+            - light_leak: `{{"color": "white | orange | red | blue", "intensity": float}}`
+            - spin: `{{"angle_delta": float, "zoom_scale": float}}`
+            - ripple: `{{"wave_frequency": float, "wave_amplitude": float}}`
+        - COLOR GRADING: You can optionally set `"color_grade"` per timeline item to enhance the mood and aesthetic. Use parameters within their allowed ranges:
+          - brightness (0.5 to 1.8) & contrast (0.5 to 2.0).
+          - saturation (0.0 to 2.0) & vibrance (0.0 to 2.0): use higher values for high-energy/hooks, low/zero values for moody/B&W.
+          - temperature (-50.0 to 50.0): positive values make the clip warm/golden hour, negative values make it cool/moody.
+          - vignette_strength (0.0 to 1.0) & vignette_radius (0.0 to 2.0): use to draw focus towards the center.
+        - SPEED RAMPING & MOTION: You can alter the time mapping of a clip.
+          - Option A: Set `"speed_preset"` to one of:
+            - `"constant_fast"` (flat 2.0x speed)
+            - `"constant_slow"` (flat 0.5x slow-mo)
+            - `"ramp_up"` (starts normal 1.0x, accelerates to 2.5x at the end)
+            - `"ramp_down"` (starts fast 2.5x, decelerates to 1.0x)
+            - `"speed_bump"` (normal -> fast 3.0x mid-clip spike -> normal)
+            - `"freeze_frame"` (starts normal, holds/slows down to 0.05x in the middle, then resumes)
+          - Option B: Construct custom `"speed_keyframes"` as a list of `[time_fraction, speed_multiplier]` pairs. For example, `[[0.0, 1.0], [0.5, 3.0], [1.0, 1.0]]` speeds up the middle of the clip by 3x. The array must start at `0.0` and end at `1.0`, with time fractions sorted in ascending order.
+          - Mutual Exclusion: Never set both `speed_preset` and `speed_keyframes` on the same item.
+        - REVERSE PLAYBACK: Set `"reverse"` to `true` to play the clip backwards.
+        - STABILIZATION: Set `"stabilize"` to `true` (and optional `"stabilize_strength"` between 0.0 and 1.0, default 0.5) for clips where the visual analysis notes handheld or shaky camera movement.
+        - TEXT STYLE PRESETS: Set `"text_preset"` to style the visual text overlay:
+          - `"bold_hype"` (Impact font, yellow, heavy black outline)
+          - `"classic_clean"` (Arial font, white, thin outline)
+          - `"neon_glow"` (Courier, bright neon cyan/green)
+          - `"minimal_pop"` (Arial font, white, clean/borderless)
+        - TEXT & STICKER ANIMATIONS: Set `"text_animation"` or `"sticker_animation"` to animate the entry/exit motion:
+          - `"fade"` (opacity fade in/out)
+          - `"slide_up"` (enters sliding up from bottom, exits sliding down off bottom)
+          - `"slide_down"` (enters sliding down from top, exits sliding up off top)
+          - `"slide_left"` (enters sliding left from right, exits sliding left off left)
+          - `"slide_right"` (enters sliding right from left, exits sliding right off right)
+          - `"none"` (default, static)
         - BEAT SYNC: Try to align 'timeline_end' of clips with 'audio_rhythm' beats if possible.
         - MUSIC DROPS: Align major high-energy transitions, sound design triggers (like bass drops or whooshes), and important visual actions with the music 'drops' timestamps in 'audio_rhythm' for maximum impact.
         - PHOTO HANDLING: For clips where 'duration_seconds' is null in file_metadata, the clip is a photo.
@@ -416,19 +734,26 @@ class CreativeDirector:
         - Only return the JSON object.
         """
 
-        user_message = f"User Intent: {user_prompt}\n\nContext Data: {json.dumps(context, indent=2)}"
+        cleaned_context = self._clean_nested_profanity(context)
+        cleaned_prompt = self._clean_profanity(user_prompt)
+        user_message = f"User Intent: {cleaned_prompt}\n\nContext Data: {json.dumps(cleaned_context, indent=2)}"
 
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message}
         ]
         if feedback:
+            cleaned_feedback = self._clean_profanity(feedback)
             messages.append({
                 "role": "system",
-                "content": f"CRITICAL REVISION DIRECTIVE:\nYour previous EDL generation failed rendering safety checks. Please correct this issue in your new EDL output:\n{feedback}"
+                "content": f"CRITICAL REVISION DIRECTIVE:\nYour previous EDL generation failed rendering safety checks. Please correct this issue in your new EDL output:\n{cleaned_feedback}"
             })
 
-        all_models = [self.model_id] + list(self.fallback_models)
+        all_models = [self.model_id]
+        for m in self.fallback_models:
+            if m not in all_models:
+                all_models.append(m)
+
         logger.info(f"CreativeDirector: Model order: {all_models}")
         logger.debug(f"CreativeDirector (System Prompt):\n{system_prompt}")
         logger.debug(f"CreativeDirector (User Message):\n{user_message}")
@@ -443,23 +768,14 @@ class CreativeDirector:
         for attempt in range(3):
             for model_id in all_models:
                 try:
-                    if model_id == self.model_id:
-                        logger.info(f"CreativeDirector: Calling Groq model: {model_id}")
-                        response = self._call_groq(messages, model_id)
-                    else:
-                        logger.info(
-                            f"CreativeDirector: Falling back to Ollama model: {model_id} "
-                            f"(timeout={self.ollama_timeout_seconds}s)"
-                        )
-                        response = self._call_ollama(model_id, messages)
+                    logger.info(f"CreativeDirector: Calling Gemini model: {model_id}")
+                    response = self._call_gemini(model_id, messages)
                     break
                 except Exception as e:
                     last_error = e
-                    if "timed out" in str(e).lower() or isinstance(e, TimeoutError):
-                        logger.warning(f"CreativeDirector: Model '{model_id}' timed out after {self.ollama_timeout_seconds}s")
-                else:
-                    logger.warning(f"CreativeDirector: Model '{model_id}' failed: {e}")
-                continue
+                    logger.warning(f"CreativeDirector: Gemini Model '{model_id}' failed: {e}")
+            if response is not None:
+                break
 
         if response is None:
             logger.warning(f"CreativeDirector: All models failed, using heuristic fallback EDL: {last_error}")
@@ -468,7 +784,7 @@ class CreativeDirector:
         try:
             raw_content = response.choices[0].message.content
             logger.debug(f"CreativeDirector (Raw Output):\n{raw_content}")
-            edl = self._sanitize_edl(json.loads(raw_content))
+            edl = self._sanitize_edl(json.loads(raw_content), media_analyses)
             
             timeline = edl.get("timeline", [])
             # Programmatic Hook Enforcement
@@ -489,7 +805,7 @@ class CreativeDirector:
                     logger.info("Hook enforcement: Programmatically forced first timeline item details.is_hook = True and keep_original_audio = True.")
 
         except Exception as e:
-            logger.error(f"CreativeDirector: Error parsing response from Groq: {e}")
+            logger.error(f"CreativeDirector: Error parsing response from Gemini: {e}")
             return {
                 "error": "Failed to generate structured EDL",
                 "raw_response": response.choices[0].message.content if response else "No response",
@@ -516,11 +832,12 @@ class CreativeDirector:
                         end = float(end_str)
                         max_duration = clip_duration_lookup.get(filename)
                         if max_duration is not None:
-                            # Clamp start to clip duration
-                            if start > max_duration:
-                                start = max_duration
+                            safe_max_duration = max(0.0, max_duration - 0.15)
+                            # Clamp start to safe_max_duration
+                            if start > safe_max_duration:
+                                start = safe_max_duration
                             # Available duration from start
-                            available = max_duration - start
+                            available = safe_max_duration - start
                             if available < 0:
                                 available = 0.0
                             # Desired segment length
@@ -550,15 +867,16 @@ class CreativeDirector:
                     end = float(end_str)
                     max_duration = clip_duration_lookup.get(filename)
                     if max_duration is not None:
-                        # Clamp start to max_duration
-                        if start > max_duration:
-                            start = max_duration
+                        safe_max_duration = max(0.0, max_duration - 0.15)
+                        # Clamp start to safe_max_duration
+                        if start > safe_max_duration:
+                            start = safe_max_duration
                         # Ensure end is not less than start
                         if end < start:
                             end = start
-                        # Clamp end to max_duration
-                        if end > max_duration:
-                            end = max_duration
+                        # Clamp end to safe_max_duration
+                        if end > safe_max_duration:
+                            end = safe_max_duration
                         # Update clip_name with clamped values
                         item["clip_name"] = f"{filename}:{start:.3f}:{end:.3f}"
                 except ValueError:
@@ -575,66 +893,162 @@ class CreativeDirector:
             diff = target_duration - rendered_duration
             if timeline:
                 last_item = timeline[-1]
-                # Extend timeline_end and end_in_clip by diff, respecting clip max duration
-                last_item["timeline_end"] = last_item.get("timeline_end", 0) + diff
-                # Adjust end_in_clip if possible
                 clip_name = last_item.get("clip_name", "")
                 parts = clip_name.split(":")
+                
+                actual_diff = 0.0
                 if len(parts) == 3:
                     filename, start_str, end_str = parts
                     try:
-                        end = float(end_str) + diff
+                        start_val = float(start_str)
+                        end_val = float(end_str)
                         max_duration = clip_duration_lookup.get(filename)
-                        if max_duration is not None and end > max_duration:
-                            end = max_duration
-                        last_item["end_in_clip"] = end
-                        # Update clip_name with new end if changed
-                        last_item["clip_name"] = f"{filename}:{start_str}:{end:.3f}"
+                        if max_duration is not None:
+                            safe_max_duration = max(0.0, max_duration - 0.15)
+                            allowed_extension = max(0.0, safe_max_duration - end_val)
+                            actual_diff = min(diff, allowed_extension)
+                            
+                            last_item["timeline_end"] = last_item.get("timeline_end", 0) + actual_diff
+                            new_end = end_val + actual_diff
+                            last_item["end_in_clip"] = new_end - start_val
+                            last_item["clip_name"] = f"{filename}:{start_val:.3f}:{new_end:.3f}"
                     except ValueError:
                         pass
-                logger.warning(f"Adjusted timeline to meet target duration: added {diff:.3f}s to last clip.")
+                else:
+                    filename = clip_name
+                    try:
+                        max_duration = clip_duration_lookup.get(filename)
+                        if max_duration is not None:
+                            safe_max_duration = max(0.0, max_duration - 0.15)
+                            start_val = float(last_item.get("start_in_clip", 0.0))
+                            end_val = float(last_item.get("end_in_clip", 0.0))
+                            allowed_extension = max(0.0, safe_max_duration - end_val)
+                            actual_diff = min(diff, allowed_extension)
+                            
+                            last_item["timeline_end"] = last_item.get("timeline_end", 0) + actual_diff
+                            last_item["end_in_clip"] = end_val + actual_diff
+                    except ValueError:
+                        pass
+                
+                if actual_diff > 0:
+                    logger.warning(f"Adjusted timeline to meet target duration: added {actual_diff:.3f}s to last clip.")
         rendered_duration = sum(
             item.get("timeline_end", 0) - item.get("timeline_start", 0) for item in timeline
         )
-        if rendered_duration < target_duration:
+        while rendered_duration < target_duration:
             remaining = target_duration - rendered_duration
-            # Find a clip that can accommodate the remaining duration (max 5s for filler)
+            if remaining < 0.1:
+                break
             filler_duration = min(remaining, 5.0)
-            filler_clip = None
-            for fname, dur in clip_duration_lookup.items():
-                if dur >= filler_duration:
-                    filler_clip = fname
+
+            # Find the best unused highlight segment to use as filler.
+            used_ranges: Dict[str, List] = {}
+            for item in timeline:
+                cn = item.get("clip_name", "")
+                parts = cn.split(":")
+                if len(parts) == 3:
+                    fn, s, e = parts
+                    used_ranges.setdefault(fn, []).append((float(s), float(e)))
+
+            best_filler_clip = None
+            best_filler_start = 0.0
+            best_filler_score = -1.0
+
+            for clip in context.get("available_clips", []):
+                fname = clip.get("filename")
+                if not fname:
+                    continue
+                # Check highlights (already sorted by priority DESC)
+                for seg in clip.get("highlights", []) + clip.get("segments", []):
+                    seg_start = float(seg.get("start", 0.0))
+                    seg_end = float(seg.get("end", seg_start + filler_duration))
+                    seg_duration = seg_end - seg_start
+                    if seg_duration < filler_duration:
+                        continue  # too short
+                    score = float(seg.get("priority_score", 0.0))
+                    if score <= best_filler_score:
+                        continue
+                    # Check it doesn't overlap with already used ranges
+                    already_used = False
+                    for (us, ue) in used_ranges.get(fname, []):
+                        if not (seg_end <= us or seg_start >= ue):  # overlap
+                            already_used = True
+                            break
+                    if already_used:
+                        continue
+                    best_filler_clip = fname
+                    best_filler_start = seg_start
+                    best_filler_score = score
+
+            # Pass 2: If no completely unused range was found (e.g. short input footage),
+            # find the best segment overall (allowing reuse/overlaps)
+            if best_filler_clip is None:
+                for clip in context.get("available_clips", []):
+                    fname = clip.get("filename")
+                    if not fname:
+                        continue
+                    for seg in clip.get("highlights", []) + clip.get("segments", []):
+                        seg_start = float(seg.get("start", 0.0))
+                        seg_end = float(seg.get("end", seg_start + filler_duration))
+                        seg_duration = seg_end - seg_start
+                        if seg_duration < filler_duration:
+                            continue
+                        score = float(seg.get("priority_score", 0.0))
+                        if score > best_filler_score:
+                            best_filler_clip = fname
+                            best_filler_start = seg_start
+                            best_filler_score = score
+
+            # Hard fallback: first clip at time 0 if nothing better found
+            if best_filler_clip is None:
+                best_filler_clip = next(iter(clip_duration_lookup), None)
+                best_filler_start = 0.0
+
+            if best_filler_clip:
+                end_in_clip = best_filler_start + filler_duration
+                max_dur = clip_duration_lookup.get(best_filler_clip)
+                if max_dur is not None:
+                    safe_max_dur = max(0.0, max_dur - 0.15)
+                    end_in_clip = min(end_in_clip, safe_max_dur)
+                    filler_duration = end_in_clip - best_filler_start
+                
+                if filler_duration <= 0.05:
                     break
-            if filler_clip is None:
-                # fallback to any clip (use first available)
-                filler_clip = next(iter(clip_duration_lookup), None)
-            if filler_clip:
-                # Determine start time within the clip (use 0)
-                start_in_clip = 0.0
-                end_in_clip = start_in_clip + filler_duration
-                # Compute timeline positions
+                    
                 last_timeline_end = timeline[-1].get("timeline_end", 0) if timeline else 0.0
                 filler_item = {
-                    "clip_name": f"{filler_clip}:0.000:{end_in_clip:.3f}",
-                    "start_in_clip": start_in_clip,
-                    "end_in_clip": end_in_clip,
+                    "clip_name": f"{best_filler_clip}:{best_filler_start:.3f}:{end_in_clip:.3f}",
+                    "start_in_clip": 0.0,
+                    "end_in_clip": filler_duration,
                     "timeline_start": last_timeline_end,
                     "timeline_end": last_timeline_end + filler_duration,
-                    "transition": "none",
+                    "transition": "crossfade",
                     "text_overlay": "",
                     "details": {
-                        "visual_cue": "Filler",
+                        "visual_cue": "Continuation",
                         "sound_design": "",
                         "pacing_style": "jump-cut",
                         "is_hook": False,
+                        "keep_original_audio": True,
+                        "effect_type": "none",
+                        "effect_query": "",
+                        "sticker_query": "",
+                        "sticker_position": "bottom-center",
                     },
                 }
                 timeline.append(filler_item)
                 logger.warning(
-                    f"Added filler clip '{filler_clip}' of {filler_duration:.3f}s to meet target duration."
+                    f"Added filler clip '{best_filler_clip}' [{best_filler_start:.1f}s] "
+                    f"(priority={best_filler_score:.1f}) of {filler_duration:.3f}s to meet target duration."
                 )
             else:
                 logger.error("Unable to find any clip to use as filler for duration mismatch.")
+                break
+            
+            # Recalculate rendered_duration for next loop check
+            rendered_duration = sum(
+                item.get("timeline_end", 0) - item.get("timeline_start", 0) for item in timeline
+            )
         # Log final adjustment if any
         if rendered_duration < target_duration:
             logger.warning(

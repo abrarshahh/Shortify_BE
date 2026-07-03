@@ -13,6 +13,7 @@ from backend_ai.services.editor_service import VideoEditor
 from backend_ai.agents.subtitle_agent import SubtitleAgent
 from backend_ai.services.color_service import ColorGradingAgent
 from backend_ai.agents.project_analyst_agent import ProjectAnalystAgent
+from backend_ai.services.relevance_service import RelevanceScorer
 from backend_ai.agents.thumbnail_agent import ThumbnailAgent
 from backend_ai.agents.clip_scoring_agent import ClipScoringAgent
 from backend_ai.services.edl_validation_service import validate_edl
@@ -74,6 +75,7 @@ class ShortifyOrchestrator:
         self.analyst_agent = ProjectAnalystAgent()
         self.thumbnail_agent = ThumbnailAgent()
         self.clip_scoring_agent = ClipScoringAgent()
+        self.relevance_scorer = RelevanceScorer()
         
         # Subtitle config
         sub_config = AGENTS_CONFIG.get("subtitle_agent", {})
@@ -93,6 +95,7 @@ class ShortifyOrchestrator:
         workflow.add_node("analyze_rhythm", self.node_analyze_rhythm)
         workflow.add_node("pre_flight_check", self.node_pre_flight_check)
         workflow.add_node("analyze_media", self.node_analyze_media)
+        workflow.add_node("score_relevance", self.node_score_relevance)
         workflow.add_node("score_clips", self.node_score_clips)
         workflow.add_node("generate_edl", self.node_generate_edl)
         workflow.add_node("render_video", self.node_render_video)
@@ -105,7 +108,8 @@ class ShortifyOrchestrator:
         workflow.add_edge("pre_flight_check", "score_clips")
         workflow.add_edge("score_clips", "analyze_rhythm")
         workflow.add_edge("analyze_rhythm", "analyze_media")
-        workflow.add_edge("analyze_media", "generate_edl")
+        workflow.add_edge("analyze_media", "score_relevance")
+        workflow.add_edge("score_relevance", "generate_edl")
         workflow.add_edge("generate_edl", "render_video")
         workflow.add_edge("render_video", "color_grade")
         workflow.add_edge("color_grade", "review_safety")
@@ -174,7 +178,12 @@ class ShortifyOrchestrator:
         for path in state["video_paths"]:
             if os.path.exists(path):
                 logger.info(f"Analyzing visual context for: {path}")
-                analysis = self.media_agent.analyze_video(path)
+                analysis = self.media_agent.analyze_video(path, user_prompt=state["project_title"])
+                
+                # Check for analysis errors to prevent silent failure
+                if "error" in analysis:
+                    raise ValueError(f"Media analysis failed for clip '{path}': {analysis['error']}")
+                    
                 visual_data.append(analysis)
                 # Small delay to avoid bursting the Gemini API rate limit
                 import time
@@ -182,6 +191,18 @@ class ShortifyOrchestrator:
             else:
                 logger.warning(f"Video not found at {path}")
                 
+        return {"visual_data": visual_data}
+
+    def node_score_relevance(self, state: AgentState) -> Dict:
+        logger.info("NODE: score_relevance")
+        callback = state.get("progress_callback")
+        if callback:
+            callback(62, "Scoring segment relevance to topic brief...")
+            
+        visual_data = self.relevance_scorer.score_segments(
+            user_prompt=state["project_title"],
+            media_analyses=state["visual_data"]
+        )
         return {"visual_data": visual_data}
 
     def node_score_clips(self, state: AgentState) -> Dict:
@@ -443,14 +464,15 @@ class ShortifyOrchestrator:
                 "final_video_path": final_output
             }
 
-        logger.info(f"Transcribing audio for {video_path}...")
-        transcription = self.subtitle_agent.transcribe(video_path)
+        caption_style = state.get("caption_style") or getattr(self.subtitle_agent, "caption_style", "hormozi")
+        logger.info(f"Transcribing audio for {video_path} with style {caption_style}...")
+        transcription = self.subtitle_agent.transcribe(video_path, style_name=caption_style)
         
         dynamic_style = state.get("dynamic_style")
         
         if transcription["captions"]:
             logger.info(f"Burning subtitles to {final_output}...")
-            style_param = dynamic_style if dynamic_style else getattr(self.subtitle_agent, "caption_style", "hormozi")
+            style_param = dynamic_style if dynamic_style else caption_style
             final_video_path = self.subtitle_agent.burn_subtitles(
                 video_path=video_path,
                 captions=transcription["captions"],

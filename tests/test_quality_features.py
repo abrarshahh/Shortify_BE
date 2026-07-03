@@ -473,37 +473,35 @@ def test_creative_director_drops_context(monkeypatch):
     import json
     from backend_ai.agents.director_agent import CreativeDirector
     
-    # Mock GROQ_API_KEY env var
-    monkeypatch.setenv("GROQ_API_KEY", "fake_key")
+    # Mock GEMINI_API_KEY env var
+    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
     
     captured_messages = []
     
-    class MockCompletions:
-        def create(self, model, messages, response_format=None):
+    class MockResponse:
+        def __init__(self, text):
+            self.text = text
+
+    class MockModels:
+        def generate_content(self, model, contents, config=None):
             nonlocal captured_messages
-            captured_messages = messages
-            
-            # Return a mock response with valid EDL JSON structure
-            class MockMessage:
-                content = json.dumps({
-                    "title": "Mock Video",
-                    "storyline": "Storyline",
-                    "total_duration": 15.0,
-                    "music_start_offset": 0.0,
-                    "timeline": []
-                })
-            class MockChoice:
-                message = MockMessage()
-            class MockResponse:
-                choices = [MockChoice()]
-                
-            return MockResponse()
+            captured_messages = [
+                {"role": "system", "content": config.system_instruction},
+                {"role": "user", "content": contents}
+            ]
+            return MockResponse(json.dumps({
+                "title": "Mock Video",
+                "storyline": "Storyline",
+                "total_duration": 15.0,
+                "music_start_offset": 0.0,
+                "timeline": []
+            }))
 
-    class MockGroq:
-        def __init__(self, api_key):
-            self.chat = type("Chat", (), {"completions": MockCompletions()})()
+    class MockClient:
+        models = MockModels()
 
-    monkeypatch.setattr("backend_ai.agents.director_agent.Groq", MockGroq)
+    import backend_ai.agents.director_agent as da
+    monkeypatch.setattr(da, "get_gemini_client", lambda: MockClient())
 
     director = CreativeDirector()
     
@@ -833,69 +831,66 @@ def test_orchestrator_clip_scoring(monkeypatch):
 def test_director_json_schema(monkeypatch):
     import json
     from backend_ai.agents.director_agent import CreativeDirector
-    monkeypatch.setenv("GROQ_API_KEY", "fake_key")
+    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
     
-    captured_kwargs = {}
-    class MockCompletions:
-        def create(self, **kwargs):
-            nonlocal captured_kwargs
-            captured_kwargs = kwargs
-            class MockMessage:
-                content = json.dumps({
-                    "title": "A", "storyline": "B", "total_duration": 10.0, "music_start_offset": 0.0,
-                    "timeline": [{"clip_name": "x.mp4", "start_in_clip": 0.0, "end_in_clip": 10.0,
-                                  "timeline_start": 0.0, "timeline_end": 10.0, "transition": "none",
-                                  "details": {"visual_cue": "v", "sound_design": "s", "pacing_style": "jump-cut", "is_hook": True}}]
-                })
-            class MockChoice:
-                message = MockMessage()
-            class MockResponse:
-                choices = [MockChoice()]
+    captured_config = None
+    class MockResponse:
+        text = json.dumps({
+            "title": "A", "storyline": "B", "total_duration": 10.0, "music_start_offset": 0.0,
+            "timeline": [{"clip_name": "x.mp4", "start_in_clip": 0.0, "end_in_clip": 10.0,
+                          "timeline_start": 0.0, "timeline_end": 10.0, "transition": "none",
+                          "details": {"visual_cue": "v", "sound_design": "s", "pacing_style": "jump-cut", "is_hook": True}}]
+        })
+
+    class MockModels:
+        def generate_content(self, model, contents, config=None):
+            nonlocal captured_config
+            captured_config = config
             return MockResponse()
 
-    class MockGroq:
-        def __init__(self, api_key):
-            self.chat = type("Chat", (), {"completions": MockCompletions()})()
+    class MockClient:
+        models = MockModels()
 
-    monkeypatch.setattr("backend_ai.agents.director_agent.Groq", MockGroq)
+    import backend_ai.agents.director_agent as da
+    monkeypatch.setattr(da, "get_gemini_client", lambda: MockClient())
     
     director = CreativeDirector()
     director.generate_edl(user_prompt="intent", audio_analysis={}, media_analyses=[], target_duration=10)
     
-    assert "response_format" in captured_kwargs
-    rf = captured_kwargs["response_format"]
-    assert rf["type"] in ["json_object", "json_schema"]
+    assert captured_config is not None
+    assert captured_config.response_mime_type == "application/json"
 
 
 
 def test_director_quality_scores_context(monkeypatch):
     import json
     from backend_ai.agents.director_agent import CreativeDirector
-    monkeypatch.setenv("GROQ_API_KEY", "fake_key")
+    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
     
     captured_messages = []
-    class MockCompletions:
-        def create(self, **kwargs):
+    class MockResponse:
+        def __init__(self, text):
+            self.text = text
+
+    class MockModels:
+        def generate_content(self, model, contents, config=None):
             nonlocal captured_messages
-            captured_messages = kwargs["messages"]
-            class MockMessage:
-                content = json.dumps({
-                    "title": "A", "storyline": "B", "total_duration": 10.0, "music_start_offset": 0.0,
-                    "timeline": [{"clip_name": "x.mp4", "start_in_clip": 0.0, "end_in_clip": 10.0,
-                                  "timeline_start": 0.0, "timeline_end": 10.0, "transition": "none",
-                                  "details": {"visual_cue": "v", "sound_design": "s", "pacing_style": "jump-cut", "is_hook": True}}]
-                })
-            class MockChoice:
-                message = MockMessage()
-            class MockResponse:
-                choices = [MockChoice()]
-            return MockResponse()
+            captured_messages = [
+                {"role": "system", "content": config.system_instruction},
+                {"role": "user", "content": contents}
+            ]
+            return MockResponse(json.dumps({
+                "title": "A", "storyline": "B", "total_duration": 10.0, "music_start_offset": 0.0,
+                "timeline": [{"clip_name": "x.mp4", "start_in_clip": 0.0, "end_in_clip": 10.0,
+                              "timeline_start": 0.0, "timeline_end": 10.0, "transition": "none",
+                              "details": {"visual_cue": "v", "sound_design": "s", "pacing_style": "jump-cut", "is_hook": True}}]
+            }))
 
-    class MockGroq:
-        def __init__(self, api_key):
-            self.chat = type("Chat", (), {"completions": MockCompletions()})()
+    class MockClient:
+        models = MockModels()
 
-    monkeypatch.setattr("backend_ai.agents.director_agent.Groq", MockGroq)
+    import backend_ai.agents.director_agent as da
+    monkeypatch.setattr(da, "get_gemini_client", lambda: MockClient())
     
     director = CreativeDirector()
     
@@ -941,45 +936,42 @@ def test_director_quality_scores_context(monkeypatch):
 def test_director_hook_enforcement(monkeypatch):
     import json
     from backend_ai.agents.director_agent import CreativeDirector
-    monkeypatch.setenv("GROQ_API_KEY", "fake_key")
+    monkeypatch.setenv("GEMINI_API_KEY", "fake_key")
     
-    class MockCompletions:
-        def create(self, **kwargs):
-            # Return an EDL where the first clip details have is_hook = False
-            class MockMessage:
-                content = json.dumps({
-                    "title": "A",
-                    "storyline": "B",
-                    "total_duration": 10.0,
-                    "music_start_offset": 0.0,
-                    "timeline": [
-                        {
-                            "clip_name": "x.mp4",
-                            "start_in_clip": 0.0,
-                            "end_in_clip": 10.0,
-                            "timeline_start": 0.0,
-                            "timeline_end": 10.0,
-                            "transition": "none",
-                            "details": {
-                                "visual_cue": "v",
-                                "sound_design": "s",
-                                "pacing_style": "jump-cut",
-                                "is_hook": False  # Hook is false!
-                            }
+    class MockResponse:
+        def __init__(self, text):
+            self.text = text
+
+    class MockModels:
+        def generate_content(self, model, contents, config=None):
+            return MockResponse(json.dumps({
+                "title": "A",
+                "storyline": "B",
+                "total_duration": 10.0,
+                "music_start_offset": 0.0,
+                "timeline": [
+                    {
+                        "clip_name": "x.mp4",
+                        "start_in_clip": 0.0,
+                        "end_in_clip": 10.0,
+                        "timeline_start": 0.0,
+                        "timeline_end": 10.0,
+                        "transition": "none",
+                        "details": {
+                            "visual_cue": "v",
+                            "sound_design": "s",
+                            "pacing_style": "jump-cut",
+                            "is_hook": False  # Hook is false!
                         }
-                    ]
-                })
-            class MockChoice:
-                message = MockMessage()
-            class MockResponse:
-                choices = [MockChoice()]
-            return MockResponse()
+                    }
+                ]
+            }))
 
-    class MockGroq:
-        def __init__(self, api_key):
-            self.chat = type("Chat", (), {"completions": MockCompletions()})()
+    class MockClient:
+        models = MockModels()
 
-    monkeypatch.setattr("backend_ai.agents.director_agent.Groq", MockGroq)
+    import backend_ai.agents.director_agent as da
+    monkeypatch.setattr(da, "get_gemini_client", lambda: MockClient())
     
     director = CreativeDirector()
     edl = director.generate_edl(user_prompt="intent", audio_analysis={}, media_analyses=[], target_duration=10)

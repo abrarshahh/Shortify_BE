@@ -1,7 +1,7 @@
 # Configuration settings for the backend AI application.
 
 # Target Video Tolerance for Duration (in percentage)
-TARGET_DURATION_TOLERANCE = 0.15
+TARGET_DURATION_TOLERANCE = 0.24
 
 # Video editor settings
 VIDEO_EDITOR_DEFAULT_FADE_DURATION = 0.3

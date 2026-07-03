@@ -38,6 +38,7 @@ def list_all_projects(
                 target_duration=proj.target_duration,
                 aspect_ratio=proj.aspect_ratio,
                 style=proj.style,
+                caption_style=proj.caption_style,
                 created_at=proj.created_at,
                 render_status=job.get("status", "not_started"),
             )
@@ -57,7 +58,8 @@ def create_project(
         description=project_data.description,
         target_duration=project_data.target_duration,
         aspect_ratio=project_data.aspect_ratio,
-        style=project_data.style
+        style=project_data.style,
+        caption_style=project_data.caption_style
     )
     db.add(proj)
     db.commit()
@@ -70,6 +72,7 @@ def create_project(
         target_duration=proj.target_duration,
         aspect_ratio=proj.aspect_ratio,
         style=proj.style,
+        caption_style=proj.caption_style,
         music_id=str(proj.music_id) if proj.music_id else None,
         created_at=proj.created_at
     )
@@ -102,7 +105,6 @@ def get_project_details(
                 extra_metadata=asset.extra_metadata,
                 uploaded_at=asset.uploaded_at
             ))
-            
     return ProjectDetailResponse(
         id=str(project.id),
         title=project.title,
@@ -110,6 +112,7 @@ def get_project_details(
         target_duration=project.target_duration,
         aspect_ratio=project.aspect_ratio,
         style=project.style,
+        caption_style=project.caption_style,
         music_id=str(project.music_id) if project.music_id else None,
         created_at=project.created_at,
         media=media_list
@@ -126,9 +129,7 @@ def delete_project_soft(
     if not project:
         raise HTTPException(404, "Project not found")
         
-    # Remove relations
     db.query(ProjectMediaAsset).filter(ProjectMediaAsset.project_id == project_id).delete()
-    
     db.delete(project)
     db.commit()
     return {"message": "Project deleted (files preserved)"}
@@ -171,7 +172,7 @@ def delete_project_hard(
             db.delete(asset)
         
     # 4. Remove export directory (output video)
-    export_dir = STORAGE_ROOT / "exports" / project_id
+    export_dir = STORAGE_ROOT / "exports" / str(project_id)
     if export_dir.exists() and export_dir.is_dir():
         shutil.rmtree(export_dir)
         
