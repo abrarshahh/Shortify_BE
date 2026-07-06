@@ -1,42 +1,32 @@
 # Shortify AI Backend
 
-Shortify is a production-grade, fully autonomous short-form video production engine. It accepts raw video footage and a creative brief, then applies a chain of AI agents to analyze the content, plan an edit, render the video, validate platform safety, and burn subtitles — all without human intervention.
+Shortify AI is an autonomous, production-grade short-form video generation engine. It transforms raw video footage and a creative brief into edited, color-graded, paced, and captioned videos ready for TikTok, Instagram Reels, and YouTube Shorts.
 
-The system is built on a **LangGraph state machine** that orchestrates six specialized AI agents, exposed via a **FastAPI** HTTP server with PostgreSQL-backed project management.
-
----
-
-## Table of Contents
-
-- [Architecture Overview](#architecture-overview)
-- [Agent Pipeline Flow](#agent-pipeline-flow)
-- [Directory Structure](#directory-structure)
-- [Technology Stack](#technology-stack)
-- [Setup and Installation](#setup-and-installation)
-- [Environment Variables](#environment-variables)
-- [Running the Server](#running-the-server)
-- [API Reference](#api-reference)
-- [Database Schema](#database-schema)
-- [Configuration](#configuration)
+The system is built on a **LangGraph state machine** that coordinates specialized AI agents, exposed via a **FastAPI** REST API with a PostgreSQL backend.
 
 ---
 
-## Architecture Overview
+## 📂 Documentation Index
 
-The system is divided into two independent layers:
+Detailed architectural specs, agent guidelines, and setup details are located under the **[docs/](file:///d:/ME/Shortify_BE/docs/)** folder:
 
-| Layer | Package | Responsibility |
-|---|---|---|
-| **AI Engine** | `backend_ai/` | Agent logic, LangGraph orchestration, video rendering |
-| **Web API** | `backend_main/` | HTTP routing, authentication, project and media management |
+1. **[docs/architecture.md](file:///d:/ME/Shortify_BE/docs/architecture.md) (System Architecture)**: Explains the multi-layer split (FastAPI routers vs. LangGraph), sequence diagram of a render lifecycle request, and orchestrator state machine variables (`AgentState`).
+2. **[docs/agents.md](file:///d:/ME/Shortify_BE/docs/agents.md) (AI Agent Directory)**: Explains the roles, models, and options of the 5 agents (Rhythm, Media, Director, Editor, Subtitle), API key rotation, key pinning/ownership details, and the project cache directory structure.
+3. **[docs/rendering_pipeline.md](file:///d:/ME/Shortify_BE/docs/rendering_pipeline.md) (Video Compositing Engine)**: Explains the FFmpeg and OpenCV compositing engine, early 30 fps CFR conversion (how it solves variable/high-framerate glitches), speed ramping curves, spatial transitions, and dynamic amix background music ducking.
+4. **[docs/database_and_env.md](file:///d:/ME/Shortify_BE/docs/database_and_env.md) (Database Schema & Config)**: Explains the database ERD, SQLAlchemy mappings, detailed configurations, and database reset logic.
+5. **[docs/api_reference.md](file:///d:/ME/Shortify_BE/docs/api_reference.md) (API Endpoint Catalog)**: Catalog of routes (Auth, Projects, Media, Audio, Render) and JSON schemas.
+6. **[docs/testing.md](file:///d:/ME/Shortify_BE/docs/testing.md) (Testing Guide)**: Explains the automated test suite structure, unit/integration test files, and verification commands.
+7. **[docs/error_handling.md](file:///d:/ME/Shortify_BE/docs/error_handling.md) (Error Handling & Fault Tolerance)**: Details Google API rate-limiting, safety self-correction loops, and validation error bypasses.
 
-The web API layer accepts user requests, stores project and media metadata in PostgreSQL, and delegates processing to the AI engine via a background task.
+---
+
+## 🚀 System Architecture
 
 ```mermaid
 graph TD
     Client([Client Application])
 
-    subgraph Web API Layer
+    subgraph Web API Layer [FastAPI Backend]
         A[FastAPI Server]
         B[Auth Router]
         C[Projects Router]
@@ -47,13 +37,13 @@ graph TD
         FS[(File Storage)]
     end
 
-    subgraph AI Engine Layer
-        G[ShortifyOrchestrator\nLangGraph]
-        H[RhythmEngineer\nlibrosa]
-        I[MediaAnalyst\nGemini 1.5 Flash]
-        J[CreativeDirector\nGroq / Llama 3.3]
-        K[VideoEditor\nMoviePy 2.0]
-        L[SubtitleAgent\nWhisper]
+    subgraph AI Engine Layer [LangGraph State Machine]
+        G[ShortifyOrchestrator]
+        H[RhythmEngineer]
+        I[MediaAnalyst]
+        J[CreativeDirector]
+        K[VideoEditor]
+        L[SubtitleAgent]
     end
 
     Client --> A
@@ -69,7 +59,7 @@ graph TD
     E --> DB
     E --> FS
     F --> DB
-    F -->|Background Task| G
+    F -->|Spawn Background Thread| G
     G --> H
     G --> I
     G --> J
@@ -79,322 +69,112 @@ graph TD
     L --> FS
 ```
 
----
+Shortify is separated into two modules:
+1. **AI Engine Layer (`backend_ai/`)**: Stateful LangGraph orchestrator, agent actions, media parsing, and video compositing.
+2. **Web API Layer (`backend_main/`)**: FastAPI routing, JWT authentication, schema validation, and background worker threads.
 
-## Agent Pipeline Flow
-
-The core of Shortify is a **LangGraph state machine** with a conditional feedback loop. If the safety check fails, the director is prompted to revise the edit plan, up to a maximum of 5 retries.
-
-```mermaid
-flowchart TD
-    START([START]) --> AR[analyze_rhythm\nRhythmEngineer\nDetects beats tempo energy]
-    AR --> AM[analyze_media\nMediaAnalyst\nGemini video understanding]
-    AM --> GE[generate_edl\nCreativeDirector\nLlama 3.3 EDL planning]
-    GE --> RV[render_video\nVideoEditor\nMoviePy local render]
-    RV --> RS[review_safety\nSubtitleAgent\nTikTok safe-zone check]
-
-    RS -->|PASS| BS[burn_subtitles\nSubtitleAgent\nWhisper transcription]
-    RS -->|WARN or FAIL\nretry count is less than 5| GE
-    RS -->|WARN or FAIL\nretry count is 5| BS
-
-    BS --> END([END\nFinal video])
-```
-
-### State Schema
-
-The entire pipeline is coordinated through a single `AgentState` TypedDict object:
-
-| Field | Type | Description |
-|---|---|---|
-| `video_paths` | `List[str]` | Absolute paths to raw input video files |
-| `music_path` | `Optional[str]` | Path to the background music file |
-| `project_title` | `str` | User-provided creative brief / prompt |
-| `rhythm_data` | `Dict` | Beat map output from `RhythmEngineer` |
-| `visual_data` | `List[Dict]` | Visual analysis output from `MediaAnalyst` |
-| `edl` | `Dict` | Edit Decision List generated by `CreativeDirector` |
-| `edl_feedback` | `str` | Safety violation feedback injected into the next EDL prompt |
-| `rendered_video_path` | `str` | Path to the rendered (pre-subtitle) video |
-| `safe_zone_report` | `Dict` | Safe-zone audit report from `SubtitleAgent` |
-| `transcription` | `Dict` | Whisper transcription result with caption segments |
-| `final_video_path` | `str` | Path to the final video with burned subtitles |
-| `retry_count` | `int` | Number of safety-check re-edit cycles completed |
+Read the detailed [System Architecture Document](file:///d:/ME/Shortify_BE/docs/architecture.md) for sequence flows and state descriptions.
 
 ---
 
-## Directory Structure
-
-```
-Shortify_BE/
-│
-├── backend_ai/                        # AI Engine Layer
-│   ├── orchestrator.py                # LangGraph state machine — entry point for the pipeline
-│   ├── services/
-│   │   ├── rhythm_service.py          # RhythmEngineer: beat detection via librosa
-│   │   ├── media_service.py           # MediaAnalyst: video understanding via Gemini 1.5 Flash
-│   │   ├── director_service.py        # CreativeDirector: EDL generation via Groq / Llama 3.3
-│   │   ├── editor_service.py          # VideoEditor: local video rendering via MoviePy 2.0
-│   │   └── subtitle_service.py        # SubtitleAgent: Whisper transcription + safe-zone checks
-│   ├── models.py                      # Pydantic output schemas for AI agents
-│   └── main.py                        # Standalone AI engine entry point (optional)
-│
-├── backend_main/                      # Web API Layer
-│   ├── main.py                        # FastAPI app initialization and router registration
-│   ├── config.py                      # DB engine, session factory, storage path, logger setup
-│   ├── models.py                      # SQLAlchemy ORM models (User, Project, MediaAsset, etc.)
-│   ├── schemas.py                     # Pydantic request/response schemas for the API
-│   ├── auth.py                        # JWT token utilities and get_current_user dependency
-│   ├── routers/
-│   │   ├── auth.py                    # POST /signup, POST /login
-│   │   ├── projects.py                # GET /projects, POST /projects, GET /projects/{id}, DELETE /projects/{id}
-│   │   ├── media.py                   # GET /media, POST /media/project/{id}/upload, POST /media/project/{id}/link
-│   │   ├── audio.py                   # GET /audio, POST /audio/project/{id}/upload, POST /audio/project/{id}/link
-│   │   └── render.py                  # POST /projects/{id}/render, GET /projects/{id}/render/status, GET /projects/outputs
-│   └── tests/                         # API integration tests
-│
-├── tests/                             # AI agent unit and integration tests
-│   ├── test_editor.py                 # Tests for VideoEditor rendering
-│   ├── test_subtitles.py              # Tests for SubtitleAgent transcription and safe-zones
-│   └── test_orchestrator.py           # End-to-end pipeline test
-│
-├── storage/                           # User file uploads organized by user/project (gitignored)
-├── requirements.txt                   # Python dependencies
-├── .env                               # Environment secrets (gitignored)
-└── .gitignore                         # Git exclusion rules
-```
-
----
-
-## Technology Stack
+## 🛠️ Technology Stack
 
 | Component | Technology | Purpose |
 |---|---|---|
-| Web framework | FastAPI | HTTP API, background tasks, dependency injection |
-| AI orchestration | LangGraph 1.x | Stateful multi-agent graph execution |
-| Audio analysis | librosa | Beat tracking, onset detection, energy mapping |
-| Video understanding | Google Gemini 1.5 Flash | Native video segment analysis via 1M token context |
-| Creative reasoning | Groq / Llama 3.3 70B | EDL generation, narrative planning |
-| Video rendering | MoviePy 2.0 | Clip trimming, transitions, text overlays, audio ducking |
-| Speech transcription | OpenAI Whisper (local, base) | Word-level timestamps, caption generation |
-| Video encoding | FFmpeg | Subtitle burning, codec processing |
-| Database ORM | SQLAlchemy 2.x | PostgreSQL interaction |
-| Authentication | JWT + argon2 | Secure password hashing and token-based sessions |
-| Data validation | Pydantic v2 | Request/response schema enforcement |
+| **Web Framework** | FastAPI | REST API endpoints & background thread workers |
+| **Orchestration** | LangGraph 1.x | Stateful multi-agent graph execution |
+| **Audio Processing** | Librosa | Rhythm beat tracking, tempo, and energy extraction |
+| **Video Understanding** | Gemini 1.5 Flash | Semantic video segment analysis |
+| **Creative Reasoner** | Groq / Llama 3.3 70B | Timeline composition and JSON EDL planning |
+| **Video Engine** | FFmpeg & OpenCV | Sub-clip cuts, speed-ramping, overlays, and transitions |
+| **Transcription** | local OpenAI Whisper | Word-level speech-to-text transcription |
+| **Database** | PostgreSQL + SQLAlchemy | Relational data persistence |
+| **Authentication** | Argon2 + JWT | Secure sessions and password hashing |
 
 ---
 
-## Setup and Installation
-
-### Prerequisites
-
-- Python 3.10+
-- PostgreSQL (running locally or remotely)
-- FFmpeg installed and available on system `PATH`
-
-### Steps
-
-1. **Clone the repository**
-
-   ```bash
-   git clone https://github.com/your-org/Shortify_BE.git
-   cd Shortify_BE
-   ```
-
-2. **Create and activate a virtual environment**
-
-   ```bash
-   python -m venv .venv
-   # Windows
-   .venv\Scripts\activate
-   # macOS / Linux
-   source .venv/bin/activate
-   ```
-
-3. **Install dependencies**
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **Configure environment variables** (see [Environment Variables](#environment-variables))
-
-5. **Initialize the database schema**
-
-   On a fresh database, run:
-
-   ```bash
-   python -m tests.reset_db
-   ```
-
-   This drops any stale tables and recreates the full schema with the correct UUID types and Foreign Key constraints.
-
----
-
-## Environment Variables
-
-Create a `.env` file in the project root. All keys are required unless marked optional.
-
-```env
-# PostgreSQL connection string
-DATABASE_URL=postgresql://user:password@localhost:5432/shortify_ai
-
-# JWT signing secret — change this in production
-SECRET_KEY=your-secret-key-here
-
-# Google Gemini API key (for MediaAnalyst)
-GEMINI_API_KEY=your-gemini-key
-
-# Groq API key (for CreativeDirector)
-GROQ_API_KEY=your-groq-key
-```
-
-> If `DATABASE_URL` is not set, the application falls back to a local SQLite file (`shortify.db`) for development convenience.
-
----
-
-## Running the Server
-
-```bash
-# Production Mode
-python -m fastapi run backend_main/main.py --port 8002
-```
-
-The API will be available at `http://localhost:8002`.  
-Interactive documentation (Swagger UI) is at `http://localhost:8002/docs`.
-
----
-
-## API Reference
-
-### Authentication
-
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/signup` | Register a new user account |
-| `POST` | `/login` | Authenticate and receive a JWT token |
-
----
-
-### Projects — Metadata and Listing
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/projects` | List all projects with current render status |
-| `POST` | `/projects` | Create a new project metadata entry |
-| `GET` | `/projects/{id}` | Get project details (including linked media and selected music) |
-| `DELETE` | `/projects/{id}` | Soft delete: removes project record but keeps media files |
-| `DELETE` | `/projects/{id}/hard` | Hard delete: removes project, links, and exclusive assets from disk |
-
----
-
-### Assets — Media and Audio Library
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/media` | List all video/photo assets in the library |
-| `POST` | `/media/project/{id}/upload` | Upload and link new videos/photos to a project |
-| `POST` | `/media/project/{id}/link` | Link existing library videos/photos to a project |
-| `GET` | `/audio` | List all audio tracks in the library |
-| `POST` | `/audio/project/{id}/upload` | Upload and set a new audio file as project music |
-| `POST` | `/audio/project/{id}/link` | Set an existing library track as project music |
-| `PUT` | `/media/project/{id}/replace/{old}/{new}` | Atomic swap of a media asset in a project |
-
----
-
-### Render — AI Pipeline
-
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/projects/{project_id}/render` | Trigger the full LangGraph pipeline |
-| `GET` | `/projects/{project_id}/render/status` | Poll current pipeline state |
-| `GET` | `/projects/outputs` | List all successfully rendered output videos |
-
----
-
-## Database Schema
+## 🔄 The Video Generation Pipeline
 
 ```mermaid
-erDiagram
-    users {
-        UUID id PK
-        VARCHAR username
-        VARCHAR email
-        VARCHAR password_hash
-        TIMESTAMP created_at
-        VARCHAR session_id
-    }
+flowchart TD
+    INPUT([Raw Inputs]) --> INIT[init_pipeline]
+    
+    INIT -->|Cached plan matches| REND[render_video]
+    INIT -->|No cache| RHYTHM[analyze_rhythm]
+    
+    RHYTHM --> MEDIA[analyze_media]
+    MEDIA --> DIR[generate_edl]
+    DIR --> REND
+    
+    REND --> SAFE[review_safety]
+    
+    SAFE -->|PASS| SUB[burn_subtitles]
+    SAFE -->|FAIL & Retry < 5| DIR
+    SAFE -->|FAIL & Retry = 5| SUB
+    
+    SUB --> END([Final Video Export])
 
-    projects {
-        UUID id PK
-        UUID user_id FK
-        VARCHAR title
-        VARCHAR description
-        INTEGER target_duration
-        VARCHAR aspect_ratio
-        VARCHAR style
-        UUID music_id FK "References media_assets.id"
-        TIMESTAMP created_at
-    }
-
-    media_assets {
-        UUID id PK
-        UUID user_id FK
-        VARCHAR original_filename
-        VARCHAR storage_path
-        VARCHAR mime_type
-        BIGINT file_size
-        INTEGER duration
-        INTEGER width
-        INTEGER height
-        VARCHAR thumbnail_path
-        JSON extra_metadata
-        TIMESTAMP uploaded_at
-    }
-
-    project_media_assets {
-        UUID project_id PK, FK
-        UUID media_asset_id PK, FK
-        TIMESTAMP added_at
-    }
-
-    login_history {
-        INTEGER id PK
-        UUID user_id FK
-        TIMESTAMP login_time
-    }
-
-    users ||--o{ projects : "owns"
-    users ||--o{ media_assets : "uploads"
-    users ||--o{ login_history : "logs"
-    projects ||--o{ project_media_assets : "contains (Many-to-Many)"
-    media_assets ||--o{ project_media_assets : "linked_to (Many-to-Many)"
-    projects ||--o| media_assets : "selected_music (1:1)"
+    style INIT fill:#f9f,stroke:#333,stroke-width:2px
+    style REND fill:#bbf,stroke:#333,stroke-width:2px
 ```
+
+### 1. Inputs
+- **Raw User Video Clips**: User-uploaded mp4 files.
+- **Background Music**: Background audio track (mp3/wav).
+- **Creative Brief / Prompts**: Narrative style and pacing preferences.
+
+### 2. Steps & Intermediary Results
+
+1. **`init_pipeline`**:
+   - Checks if a cached `director_analysis.json` exists under the project's cache path. If found, it loads the plan and fast-tracks execution straight to the rendering node, bypassing analytical API costs.
+2. **`analyze_rhythm` (RhythmEngineer)**:
+   - Evaluates the background music. Detects tempo (BPM), beat grids, and volume drops.
+   - *Intermediary Result*: `music_analysis.json` containing musical timestamps.
+3. **`analyze_media` (MediaAnalyst)**:
+   - Uploads raw videos to Gemini and runs segment analysis (detecting actions, faces, compositions, and lighting).
+   - *Intermediary Result*: `media_analysis.json` detailing frame-by-frame visual metrics.
+4. **`generate_edl` (CreativeDirector)**:
+   - Combines user inputs, beat grids, and media metrics to structure the timeline.
+   - *Intermediary Result*: `director_analysis.json` containing an Edit Decision List (EDL).
+5. **`render_video` (VideoEditor)**:
+   - Downloads sticker/vfx overlays (Giphy/Pixabay), pre-stabilizes clips, applies color grading LUTs, and merges video sections using spatial transitions and audio ducking.
+   - *Intermediary Result*: `render_trek.mp4` (clean video track) and `render_trek_graded.mp4` (color-corrected track).
+6. **`review_safety` & `burn_subtitles` (SubtitleAgent)**:
+   - Checks overlays against social media safe zones (top header, right buttons, bottom bar). If overlays fail safe-zones, it passes coordinate corrections back to the Creative Director to regenerate the EDL.
+   - Whisper transcribes spoken tracks, generates word-level timestamps, and burns captions to the video.
+   - *End Result*: `trek.mp4` (Final Dynamic social video).
+
+For code parameters and transition details, read the [AI Agents Document](file:///d:/ME/Shortify_BE/docs/agents.md) and [Video Editing Engine Document](file:///d:/ME/Shortify_BE/docs/rendering_pipeline.md).
 
 ---
 
-## Configuration
+## ⚙️ Environment Configuration
 
-### `backend_main/config.py`
+Create a `.env` file in the project root. The structure must align with `.env.example`:
 
-| Variable | Default | Description |
-|---|---|---|
-| `DATABASE_URL` | N/A | PostgreSQL connection string |
-| `SECRET_KEY` | `supersecret` | JWT signing key |
-| `STORAGE_ROOT` | `./storage` | Root directory for file uploads |
+- **DATABASE_URL**: Connection URI for PostgreSQL database.
+- **GEMINI_API_KEY**: Rotation slot keys (supports `GEMINI_API_KEY_1` to `GEMINI_API_KEY_3`) to balance uploads and bypass 429 errors.
+- **PIXABAY_APPLY**: Set to `false` to disable Pixabay visual overlay application, preventing overlay downloads.
+- **EDL_VALIDATION_FAIL**: Set to `pass` to gracefully proceed with editing if validation checks fail on the 3rd attempt, preventing rendering interruptions.
 
-### AI Pipeline — `backend_ai/orchestrator.py`
+For database tables and models, read the [Database Schema & Configuration Document](file:///d:/ME/Shortify_BE/docs/database_and_env.md).
 
-| Parameter | Default | Description |
-|---|---|---|
-| `exports_dir` | `storage/exports` | Output directory for rendered videos |
-| Max safety retries | `5` | Maximum re-edit cycles before completion |
+---
 
-### Safe-Zone Rules (`SubtitleAgent`)
+## 🚀 Running the Project Local Server
 
-The safety validator checks text overlays against TikTok / Instagram Reels UI danger zones on a `1080 x 1920` canvas:
-
-| Zone | Reserved Area | Reason |
-|---|---|---|
-| Top bar | Top 150px | Status bar, app header |
-| Bottom bar | Bottom 300px | Action bar, caption area |
-| Right side | Right 120px | Like, comment, share buttons |
+1. **Activate Environment & Install dependencies**:
+   ```bash
+   python -m venv .venv
+   .venv\Scripts\activate
+   pip install -r requirements.txt
+   ```
+2. **Reset storage and database**:
+   ```bash
+   python tests/reset_db.py
+   ```
+3. **Launch the FastAPI app**:
+   ```bash
+   python -m fastapi run backend_main/main.py --port 8002
+   ```
+Interactive API documentation will be available at `http://localhost:8002/docs`.
