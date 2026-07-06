@@ -1,4 +1,4 @@
-# Shortify AI — Backend
+# Shortify AI Backend
 
 Shortify is a production-grade, fully autonomous short-form video production engine. It accepts raw video footage and a creative brief, then applies a chain of AI agents to analyze the content, plan an edit, render the video, validate platform safety, and burn subtitles — all without human intervention.
 
