@@ -199,25 +199,7 @@ def validate_expected_render_duration(edl: EDLDocument, target_duration: float) 
         if raw_duration <= 0:
             continue
 
-        if _is_image_clip(item.clip_name):
-            effective_duration = raw_duration
-        else:
-            speed = 1.0
-            if item.speed_keyframes:
-                from backend_ai.effects.motion import get_average_speed_linear
-                speed = get_average_speed_linear(item.speed_keyframes)
-            elif item.speed_preset:
-                from backend_ai.effects.motion import SPEED_PRESETS, get_average_speed_linear
-                preset_keyframes = SPEED_PRESETS.get(item.speed_preset)
-                if preset_keyframes:
-                    speed = get_average_speed_linear(preset_keyframes)
-            else:
-                pacing = item.details.pacing_style.value
-                speed = VIDEO_EDITOR_PACING_SPEEDS.get(pacing, 1.0)
-                
-            if speed <= 0:
-                speed = 1.0
-            effective_duration = min(raw_duration, raw_duration / speed)
+        effective_duration = raw_duration
 
         transition = item.transition.value
         overlap_transitions = {

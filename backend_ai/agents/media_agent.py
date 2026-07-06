@@ -23,7 +23,7 @@ class MediaAnalyst:
         self.fallback_models = config.get("fallback_models", ["gemini-1.5-flash-8b"])
         
         # Cache configuration
-        self.cache_dir = "data/cache/media_analysis"
+        self.cache_dir = "cache/shared/media_analysis"
         os.makedirs(self.cache_dir, exist_ok=True)
 
     def _get_cache_path(self, file_path: str) -> str:
@@ -141,27 +141,16 @@ class MediaAnalyst:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Video file not found: {file_path}")
 
-        # Check Cache with 7-day TTL check
+        # Check Cache (stored forever, no expiration check)
         cache_path = self._get_cache_path(file_path)
         if os.path.exists(cache_path):
-            cache_mtime = os.path.getmtime(cache_path)
-            age_seconds = time.time() - cache_mtime
-            seven_days_seconds = 7 * 24 * 3600
-            
-            if age_seconds > seven_days_seconds:
-                logger.info(f"MediaAnalyst: Cache has expired (age: {age_seconds / 3600:.1f} hours > 7 days). Invalidating cache.")
-                try:
-                    os.remove(cache_path)
-                except Exception as ex:
-                    logger.warning(f"MediaAnalyst: Could not delete expired cache file: {ex}")
-            else:
-                logger.info(f"MediaAnalyst: Found cached analysis for: {file_path}")
-                try:
-                    with open(cache_path, "r") as f:
-                        cached_data = json.load(f)
-                    return self._normalize_analysis_durations(cached_data, cache_path)
-                except Exception as e:
-                    logger.error(f"MediaAnalyst: Error reading cache: {e}")
+            logger.info(f"MediaAnalyst: Found cached analysis for: {file_path}")
+            try:
+                with open(cache_path, "r") as f:
+                    cached_data = json.load(f)
+                return self._normalize_analysis_durations(cached_data, cache_path)
+            except Exception as e:
+                logger.error(f"MediaAnalyst: Error reading cache: {e}")
 
         file_metadata = self._get_file_metadata(file_path)
         is_image = file_metadata.get("media_type") == "photo"

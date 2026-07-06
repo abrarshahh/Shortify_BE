@@ -297,8 +297,65 @@ class VideoEditor:
         """
         target_w, target_h = self.target_w, self.target_h
         temp_kb = None
+        temp_stabilized = None
 
         try:
+            pixabay_apply = os.getenv("PIXABAY_APPLY", "true").strip().lower() == "true"
+            if not pixabay_apply:
+                effect_path = None
+
+            # Move stabilization here to process before slicing
+            stabilize_trf_path = None
+            if stabilize and not is_image:
+                dur = end_in - start_in
+                if dur >= 0.5:
+                    from backend_ai.effects.stabilization import stabilize_clip
+                    try:
+                        stabilize_trf_path = stabilize_clip(
+                            clip_path=clip_path,
+                            start=start_in,
+                            end=end_in,
+                            temp_dir=os.path.dirname(temp_path),
+                            strength=stabilize_strength
+                        )
+                        temp_stabilized = temp_path.replace(".mp4", "_stabilized_temp.mp4")
+                        trf_path_escaped = stabilize_trf_path.replace("\\", "/").replace(":", "\\:")
+                        
+                        cmd = [
+                            "ffmpeg", "-y", "-nostdin",
+                            "-ss", f"{start_in:.3f}",
+                            "-to", f"{end_in:.3f}",
+                            "-i", clip_path,
+                            "-vf", f"fps=fps=30,vidstabtransform=input={trf_path_escaped}:smoothing=15:optzoom=1",
+                            "-map", "0:v",
+                            "-map", "0:a?",
+                            "-c:v", "libx264",
+                            "-pix_fmt", "yuv420p",
+                            "-c:a", "aac",
+                            "-ar", "44100",
+                            "-ac", "2",
+                            temp_stabilized
+                        ]
+                        logger.info(f"Running stabilization render pass: {' '.join(cmd)}")
+                        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL, timeout=180)
+                        if result.returncode != 0:
+                            logger.error(f"Stabilization render pass failed: {result.stderr}")
+                            raise RuntimeError(f"FFmpeg stabilization render failed: {result.stderr}")
+                        
+                        clip_path = temp_stabilized
+                        start_in = 0.0
+                        end_in = dur
+                        stabilize_trf_path = None
+                    except Exception as e:
+                        logger.warning(f"Stabilization failed: {e}. Proceeding without stabilization.")
+                        stabilize_trf_path = None
+                        if temp_stabilized and os.path.exists(temp_stabilized):
+                            try:
+                                os.remove(temp_stabilized)
+                            except Exception:
+                                pass
+                            temp_stabilized = None
+
             if is_image:
                 duration = target_duration if target_duration > 0 else 3.0
                 kb_direction = "in"
@@ -327,19 +384,8 @@ class VideoEditor:
             
             has_audio = (not is_image) and self._check_has_audio(clip_path) and keep_original_audio
             
-            # Silence detection
-            intervals = []
-            if has_audio:
-                non_silent_intervals, _ = self._detect_non_silent_intervals(clip_path)
-                if non_silent_intervals:
-                    for ns_start, ns_end in non_silent_intervals:
-                        s = max(start_in, ns_start)
-                        e = min(end_in, ns_end)
-                        if e > s + 0.1:
-                            intervals.append((s, e))
-                            
-            if not intervals:
-                intervals = [(start_in, min(end_in, orig_duration))]
+            # Silence detection (bypassed to avoid dropping planned video frames)
+            intervals = [(start_in, min(end_in, orig_duration))]
 
             # Normalization and ducking volume factors
             norm_gain = self._get_audio_normalization_gain(clip_path) if has_audio else 1.0
@@ -374,7 +420,7 @@ class VideoEditor:
             effect_input_idx = -1
             if effect_path and os.path.exists(effect_path):
                 effect_input_idx = len(ffmpeg_inputs)
-                ffmpeg_inputs.append(("-i", effect_path))
+                ffmpeg_inputs.append(("-stream_loop -1 -i", effect_path))
                 
             sticker_input_idx = -1
             if sticker_path and os.path.exists(sticker_path):
@@ -382,22 +428,9 @@ class VideoEditor:
                 if sticker_path.lower().endswith(".gif"):
                     ffmpeg_inputs.append(("-ignore_loop 0 -i", sticker_path))
                 else:
-                    ffmpeg_inputs.append(("-i", sticker_path))
+                    ffmpeg_inputs.append(("-stream_loop -1 -i", sticker_path))
 
-            # Run stabilization if requested (videos only)
-            stabilize_trf_path = None
-            if stabilize and not is_image:
-                from backend_ai.effects.stabilization import stabilize_clip
-                try:
-                    stabilize_trf_path = stabilize_clip(
-                        clip_path=clip_path,
-                        start=start_in,
-                        end=end_in,
-                        temp_dir=os.path.dirname(temp_path),
-                        strength=stabilize_strength
-                    )
-                except Exception as e:
-                    logger.warning(f"Stabilization analysis failed: {e}. Proceeding without stabilization.")
+
 
             # Build FFmpeg filters
             filter_complex_parts = []
@@ -444,6 +477,8 @@ class VideoEditor:
                 
                 v_filters = []
                 v_filters.append(f"trim=start={s}:end={e}")
+                v_filters.append("setpts=PTS-STARTPTS")
+                v_filters.append("fps=fps=30")
                 
                 if use_custom_speed:
                     from backend_ai.effects.motion import build_ffmpeg_speed_filter
@@ -454,8 +489,6 @@ class VideoEditor:
                         reverse=reverse
                     )
                     v_filters.append(v_speed)
-                else:
-                    v_filters.append("setpts=PTS-STARTPTS")
                     
                 v_filters.append(f"scale={new_w}:{new_h}")
                 v_filters.append(f"crop={target_w}:{target_h}:{x1}:{y1}")
@@ -466,8 +499,6 @@ class VideoEditor:
                     
                 if color_filter_str:
                     v_filters.append(color_filter_str)
-
-                v_filters.append("fps=fps=30")
 
                 filter_complex_parts.append(
                     f"[0:v]{','.join(v_filters)}[{v_name}]"
@@ -621,7 +652,7 @@ class VideoEditor:
             # Apply visual effect loop overlay if present
             if effect_input_idx > 0:
                 filter_complex_parts.append(
-                    f"[{effect_input_idx}:v]scale={target_w}:{target_h},loop=loop=-1:size=32767:start=0,fps=fps=30[v_effect_scaled]"
+                    f"[{effect_input_idx}:v]scale={target_w}:{target_h},fps=fps=30[v_effect_scaled]"
                 )
                 filter_complex_parts.append(
                     f"{video_proc_in}[v_effect_scaled]blend=all_mode=screen:all_opacity=0.7[v_effect_applied]"
@@ -678,10 +709,11 @@ class VideoEditor:
             
             cmd = ["ffmpeg", "-y", "-nostdin"]
             for arg_prefix, path in ffmpeg_inputs:
-                if "ignore_loop" in arg_prefix:
-                    cmd.extend(["-ignore_loop", "0", "-i", path])
-                else:
+                if arg_prefix == "-i":
                     cmd.extend(["-i", path])
+                else:
+                    cmd.extend(arg_prefix.split())
+                    cmd.append(path)
                     
             cmd.extend([
                 "-filter_complex", filter_complex_str,
@@ -690,12 +722,19 @@ class VideoEditor:
                 "-c:v", "libx264",
                 "-pix_fmt", "yuv420p",
                 "-c:a", "aac",
+                "-ar", "44100",
+                "-ac", "2",
                 "-t", f"{output_duration:.3f}",
                 temp_path
             ])
             
             logger.info(f"Running FFmpeg clip process command: {' '.join(cmd)}")
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL)
+            try:
+                result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL, timeout=300)
+            except subprocess.TimeoutExpired as e:
+                logger.error(f"FFmpeg clip process timed out after 300 seconds for {clip_path}")
+                raise RuntimeError(f"FFmpeg clip process timed out: {e}")
+
             if result.returncode != 0:
                 logger.error(f"FFmpeg clip process failed for {clip_path}")
                 logger.error(f"FFmpeg stderr: {result.stderr}")
@@ -709,6 +748,11 @@ class VideoEditor:
                     os.remove(temp_kb)
                 except Exception as e:
                     logger.warning(f"Failed to remove temp_kb {temp_kb}: {e}")
+            if temp_stabilized and os.path.exists(temp_stabilized):
+                try:
+                    os.remove(temp_stabilized)
+                except Exception as e:
+                    logger.warning(f"Failed to remove temp_stabilized {temp_stabilized}: {e}")
 
     def _build_ffmpeg_concat(
         self,
@@ -769,8 +813,8 @@ class VideoEditor:
                 current_input = ffmpeg.input(current_path)
                 next_input = ffmpeg.input(next_path)
                 target_fps = 30
-                cur_video_norm = current_input.video.filter('fps', fps=target_fps).filter('settb', 'AVTB')
-                next_video_norm = next_input.video.filter('fps', fps=target_fps).filter('settb', 'AVTB')
+                cur_video_norm = current_input.video.filter('fps', fps=target_fps)
+                next_video_norm = next_input.video.filter('fps', fps=target_fps)
 
                 if transition in transition_map:
                     fade_dur = min(sync_fade_duration, current_duration / 2, next_duration / 2)
@@ -785,8 +829,10 @@ class VideoEditor:
                         )
 
                         if current_input.audio is not None and next_input.audio is not None:
+                            cur_audio_norm = current_input.audio.filter('aformat', sample_rates=44100, channel_layouts='stereo')
+                            next_audio_norm = next_input.audio.filter('aformat', sample_rates=44100, channel_layouts='stereo')
                             audio_stream = ffmpeg.filter(
-                                [current_input.audio, next_input.audio],
+                                [cur_audio_norm, next_audio_norm],
                                 "acrossfade",
                                 d=fade_dur,
                             )
@@ -799,6 +845,8 @@ class VideoEditor:
                                 pix_fmt="yuv420p",
                                 movflags="+faststart",
                                 nostdin=None,
+                                ar="44100",
+                                ac="2"
                             )
                         else:
                             stream = ffmpeg.output(
@@ -821,22 +869,19 @@ class VideoEditor:
                         continue
 
                 if current_input.audio is not None and next_input.audio is not None:
+                    cur_audio_norm = current_input.audio.filter('aformat', sample_rates=44100, channel_layouts='stereo')
+                    next_audio_norm = next_input.audio.filter('aformat', sample_rates=44100, channel_layouts='stereo')
                     concat_node = ffmpeg.concat(
-                        current_input.video,
-                        next_input.video,
+                        cur_video_norm,
+                        cur_audio_norm,
+                        next_video_norm,
+                        next_audio_norm,
                         n=2,
                         v=1,
-                        a=0,
-                    )
-                    video_stream = concat_node.node.stream("v")
-                    audio_node = ffmpeg.concat(
-                        current_input.audio,
-                        next_input.audio,
-                        n=2,
-                        v=0,
                         a=1,
                     )
-                    audio_stream = audio_node.node.stream("a")
+                    video_stream = concat_node.node.stream("v")
+                    audio_stream = concat_node.node.stream("a")
                     stream = ffmpeg.output(
                         video_stream,
                         audio_stream,
@@ -846,11 +891,13 @@ class VideoEditor:
                         pix_fmt="yuv420p",
                         movflags="+faststart",
                         nostdin=None,
+                        ar="44100",
+                        ac="2"
                     )
                 else:
                     concat_node = ffmpeg.concat(
-                        current_input.video,
-                        next_input.video,
+                        cur_video_norm,
+                        next_video_norm,
                         n=2,
                         v=1,
                         a=0,
@@ -878,6 +925,8 @@ class VideoEditor:
                 "pix_fmt": "yuv420p",
                 "movflags": "+faststart",
                 "nostdin": None,
+                "ar": "44100",
+                "ac": "2"
             }
 
             # Calculate dynamic audio ducking intervals (Task 34)
@@ -935,8 +984,10 @@ class VideoEditor:
                 music_audio = music_audio.filter("afade", t="out", st=fade_out_start, d=1.5)
 
                 if final_input.audio is not None:
+                    cur_audio_norm = final_input.audio.filter('aformat', sample_rates=44100, channel_layouts='stereo')
+                    music_audio_norm = music_audio.filter('aformat', sample_rates=44100, channel_layouts='stereo')
                     mixed_audio = ffmpeg.filter(
-                        [final_input.audio, music_audio],
+                        [cur_audio_norm, music_audio_norm],
                         "amix",
                         inputs=2,
                         duration="first",
@@ -944,11 +995,12 @@ class VideoEditor:
                         normalize=0,
                     )
                 else:
-                    mixed_audio = music_audio
+                    mixed_audio = music_audio.filter('aformat', sample_rates=44100, channel_layouts='stereo')
 
                 stream = ffmpeg.output(final_input.video, mixed_audio, output_path, acodec="aac", **output_args)
             elif final_input.audio is not None:
-                stream = ffmpeg.output(final_input.video, final_input.audio, output_path, acodec="aac", **output_args)
+                cur_audio_norm = final_input.audio.filter('aformat', sample_rates=44100, channel_layouts='stereo')
+                stream = ffmpeg.output(final_input.video, cur_audio_norm, output_path, acodec="aac", **output_args)
             else:
                 stream = ffmpeg.output(final_input.video, output_path, **output_args)
 
@@ -958,7 +1010,8 @@ class VideoEditor:
                 stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr)
                 raise RuntimeError(f"FFmpeg assembly failed: {stderr[-2000:]}") from exc
         finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            # shutil.rmtree(temp_dir, ignore_errors=True)
+            pass
 
     def _enforce_final_duration(self, file_path: str, target_duration: float) -> None:
         if target_duration <= 0:
@@ -1036,7 +1089,7 @@ class VideoEditor:
             try:
                 shutil.rmtree(temp_dir, ignore_errors=True)
             except Exception:
-                pass
+        pass
 
     def render(
         self,
@@ -1052,8 +1105,14 @@ class VideoEditor:
         Renders the final video from an EDL produced by CreativeDirector.
         """
         self.skipped_clips = []
-        validated_edl = validate_edl(edl, self.clips_dir)
-        edl = validated_edl.model_dump(mode="json")
+        try:
+            validated_edl = validate_edl(edl, self.clips_dir)
+            edl = validated_edl.model_dump(mode="json")
+        except Exception as exc:
+            if os.getenv("EDL_VALIDATION_FAIL", "stop").strip().lower() == "pass":
+                logger.warning(f"EDL validation failed in rendering phase: {exc}. EDL_VALIDATION_FAIL is 'pass', so bypassing validation check.")
+            else:
+                raise exc
 
         timeline = edl.get("timeline", [])
         if not timeline:
@@ -1280,7 +1339,7 @@ class VideoEditor:
                                 "-c:v", "libx264", "-pix_fmt", "yuv420p",
                                 "-c:a", "aac", trimmed_a_path
                             ]
-                            subprocess.run(cmd_trim_a, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, stdin=subprocess.DEVNULL)
+                            subprocess.run(cmd_trim_a, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=90, stdin=subprocess.DEVNULL)
 
                             # Trim B (keep [fade_dur, next_duration])
                             dur_b_trimmed = next_duration - fade_dur
@@ -1291,7 +1350,7 @@ class VideoEditor:
                                 "-c:v", "libx264", "-pix_fmt", "yuv420p",
                                 "-c:a", "aac", trimmed_b_path
                             ]
-                            subprocess.run(cmd_trim_b, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, stdin=subprocess.DEVNULL)
+                            subprocess.run(cmd_trim_b, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=90, stdin=subprocess.DEVNULL)
 
                             # Create spatial transition video in python
                             create_spatial_transition(

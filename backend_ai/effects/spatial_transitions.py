@@ -252,7 +252,7 @@ def slide_frames(frame_a: np.ndarray, frame_b: np.ndarray, direction: str, progr
         shift = int(h * progress)
         if shift > 0:
             out[:shift, :] = frame_b[h - shift:, :]
-            out[shift:, :] = frame_a[:h - shift]
+            out[shift:, :] = frame_a[:h - shift, :]
         else:
             out[:] = frame_a
     else:
@@ -525,41 +525,41 @@ def create_spatial_transition(
             cmd_a = [
                 "ffmpeg", "-y", "-nostdin", "-i", clip_a_path,
                 "-ss", f"{start_a:.3f}", "-t", f"{duration:.3f}",
-                "-vn", "-c:a", "aac", temp_audio_a
+                "-vn", "-c:a", "aac", "-ar", "44100", "-ac", "2", temp_audio_a
             ]
-            subprocess.run(cmd_a, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, stdin=subprocess.DEVNULL)
+            subprocess.run(cmd_a, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=60, stdin=subprocess.DEVNULL)
             
         if has_audio_b:
             cmd_b = [
                 "ffmpeg", "-y", "-nostdin", "-i", clip_b_path,
                 "-t", f"{duration:.3f}",
-                "-vn", "-c:a", "aac", temp_audio_b
+                "-vn", "-c:a", "aac", "-ar", "44100", "-ac", "2", temp_audio_b
             ]
-            subprocess.run(cmd_b, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, stdin=subprocess.DEVNULL)
+            subprocess.run(cmd_b, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=60, stdin=subprocess.DEVNULL)
             
         if has_audio_a and has_audio_b:
             cmd_cross = [
                 "ffmpeg", "-y", "-nostdin", "-i", temp_audio_a, "-i", temp_audio_b,
                 "-filter_complex", f"acrossfade=d={duration:.3f}",
-                "-c:a", "aac", temp_audio_cross
+                "-c:a", "aac", "-ar", "44100", "-ac", "2", temp_audio_cross
             ]
-            subprocess.run(cmd_cross, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, stdin=subprocess.DEVNULL)
+            subprocess.run(cmd_cross, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=60, stdin=subprocess.DEVNULL)
             audio_input = ["-i", temp_audio_cross]
         elif has_audio_a:
             cmd_fade = [
                 "ffmpeg", "-y", "-nostdin", "-i", temp_audio_a,
                 "-filter_complex", f"afade=t=out=st=0=d={duration:.3f}",
-                "-c:a", "aac", temp_audio_cross
+                "-c:a", "aac", "-ar", "44100", "-ac", "2", temp_audio_cross
             ]
-            subprocess.run(cmd_fade, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, stdin=subprocess.DEVNULL)
+            subprocess.run(cmd_fade, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=60, stdin=subprocess.DEVNULL)
             audio_input = ["-i", temp_audio_cross]
         elif has_audio_b:
             cmd_fade = [
                 "ffmpeg", "-y", "-nostdin", "-i", temp_audio_b,
                 "-filter_complex", f"afade=t=in=st=0=d={duration:.3f}",
-                "-c:a", "aac", temp_audio_cross
+                "-c:a", "aac", "-ar", "44100", "-ac", "2", temp_audio_cross
             ]
-            subprocess.run(cmd_fade, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, stdin=subprocess.DEVNULL)
+            subprocess.run(cmd_fade, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=60, stdin=subprocess.DEVNULL)
             audio_input = ["-i", temp_audio_cross]
         else:
             audio_input = []
@@ -569,25 +569,28 @@ def create_spatial_transition(
             cmd_merge.extend(audio_input)
             cmd_merge.extend([
                 "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-map", "0:v:0", "-map", "1:a:0",
+                "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                "-r", "30", "-map", "0:v:0", "-map", "1:a:0",
                 output_path
             ])
         else:
             cmd_merge.extend([
                 "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-r", "30",
                 output_path
             ])
             
-        subprocess.run(cmd_merge, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, stdin=subprocess.DEVNULL)
+        subprocess.run(cmd_merge, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=60, stdin=subprocess.DEVNULL)
         
     except Exception as e:
         logger.error(f"Error processing spatial transition: {e}")
         cmd_fallback = [
             "ffmpeg", "-y", "-nostdin", "-i", temp_silent_video,
             "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-r", "30",
             output_path
         ]
-        subprocess.run(cmd_fallback, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+        subprocess.run(cmd_fallback, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60, stdin=subprocess.DEVNULL)
     finally:
         for p in (temp_silent_video, temp_audio_a, temp_audio_b, temp_audio_cross):
             if os.path.exists(p):

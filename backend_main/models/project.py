@@ -17,10 +17,10 @@ class Project(Base):
     user_id = Column(PG_UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     title = Column(String, nullable=True)
     description = Column(String, nullable=True)
-    target_duration = Column(Integer, nullable=False)  # seconds
+    target_duration = Column(Integer, nullable=False, default=15)  # seconds
     aspect_ratio = Column(String, nullable=False, default="9:16")
     style = Column(String, nullable=True)
-    caption_style = Column(String, nullable=True, default="hormozi")
+    caption_style = Column(String, nullable=True, default="none")
     music_id = Column(PG_UUID(as_uuid=True), ForeignKey("media_assets.id"), nullable=True)  # FK to MediaAsset
     last_output_path = Column(String, nullable=True) # Path to the last generated video
     is_rendering = Column(Boolean, default=False)

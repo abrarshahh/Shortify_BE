@@ -8,26 +8,45 @@ from sqlalchemy import text
 import os
 import shutil
 
-# Clean temporary directories and cache files
-dirs_to_clean = [
-    "data/cache",
-    "data/exports",
-    "storage/users",
-    "storage/exports",
+# Clean temporary storage, data, and cache directories
+dirs_to_delete = [
+    "cache",
+    "storage",
+    "data",
     ".pytest_cache",
 ]
 
-print("Cleaning temporary storage and cache directories...")
-for d in dirs_to_clean:
+print("Cleaning storage, data, and cache directories...")
+for d in dirs_to_delete:
     if os.path.exists(d):
         try:
             shutil.rmtree(d)
-            print(f"  Deleted: {d}")
+            print(f"  Deleted directory: {d}")
         except Exception as e:
             print(f"  Error deleting {d}: {e}")
-    if d != ".pytest_cache":
+
+# Recreate the base directories and their expected structure
+dirs_to_recreate = [
+    "cache",
+    "storage",
+    "storage/users",
+    "storage/exports",
+    "data",
+    "data/exports",
+    "data/fonts",
+    "data/local_effects",
+    "data/local_stickers",
+    "data/luts",
+    "data/models",
+]
+
+print("Recreating base directories...")
+for d in dirs_to_recreate:
+    try:
         os.makedirs(d, exist_ok=True)
         print(f"  Recreated: {d}")
+    except Exception as e:
+        print(f"  Error recreating {d}: {e}")
 
 # Clean log files
 logs_dir = "logs"

@@ -38,7 +38,7 @@ class ClipScoringAgent:
     # set and walks the clip on a fixed cadence instead.
     FACE_SAMPLE_INTERVAL_SEC = 0.5
 
-    def __init__(self, cache_dir: str = "data/cache/clip_scores"):
+    def __init__(self, cache_dir: str = "cache/shared/clip_scores"):
         self.cache_dir = cache_dir
         os.makedirs(self.cache_dir, exist_ok=True)
         # Detector is created lazily, once per ClipScoringAgent instance,

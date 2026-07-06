@@ -8,19 +8,15 @@ from backend_main.schemas.media import MediaResponse
 class ProjectCreate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
-    target_duration: DurationEnum
-    aspect_ratio: AspectRatioEnum = AspectRatioEnum.nine_sixteen
-    style: Optional[StyleEnum] = None
-    caption_style: Optional[str] = "hormozi"
 
 class ProjectResponse(BaseModel):
     id: uuid.UUID
     title: Optional[str]
     description: Optional[str]
-    target_duration: int
-    aspect_ratio: str
-    style: Optional[str]
-    caption_style: Optional[str]
+    target_duration: Optional[int] = None
+    aspect_ratio: Optional[str] = None
+    style: Optional[str] = None
+    caption_style: Optional[str] = None
     music_id: Optional[uuid.UUID]
     created_at: datetime
 
@@ -31,9 +27,9 @@ class ProjectListItem(BaseModel):
     id: uuid.UUID
     title: Optional[str]
     description: Optional[str]
-    target_duration: int
-    aspect_ratio: str
-    style: Optional[str]
-    caption_style: Optional[str]
+    target_duration: Optional[int] = None
+    aspect_ratio: Optional[str] = None
+    style: Optional[str] = None
+    caption_style: Optional[str] = None
     created_at: Optional[datetime]
     render_status: str  # not_started | running | done | error

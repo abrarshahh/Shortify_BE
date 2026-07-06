@@ -834,6 +834,7 @@ def test_dynamic_stickers_and_effects(monkeypatch):
     
     editor = VideoEditor(clips_dir=".")
     
+    monkeypatch.setenv("PIXABAY_APPLY", "true")
     monkeypatch.setattr(editor, "_check_has_audio", lambda path: False)
     monkeypatch.setattr(VideoEditor, "_find_font", lambda self, *args, **kwargs: "fake_font.ttf")
     monkeypatch.setattr("os.path.exists", lambda path: True)
@@ -884,7 +885,7 @@ def test_dynamic_stickers_and_effects(monkeypatch):
     filter_complex_arg = next(arg for arg in cmd if "overlay" in arg)
     
     # 2. Assert screen blend visual effect overlay is set up
-    assert "[1:v]scale=1080:1920,loop=" in filter_complex_arg
+    assert "[1:v]scale=1080:1920,fps=fps=30" in filter_complex_arg
     assert "blend=all_mode=screen" in filter_complex_arg
     
     # 3. Assert sticker sizing and top-right positioning filters are mapped

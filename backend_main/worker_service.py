@@ -58,7 +58,10 @@ def _execute_render_task(
     target_duration: int,
     aspect_ratio: str,
     style: str,
-    caption_style: str = "hormozi",
+    caption_style: str = "none",
+    add_subtitle: bool = True,
+    add_stickers: bool = True,
+    add_textoverlay: bool = True,
 ):
     """
     Synchronous worker task running inside the ThreadPool thread.
@@ -107,6 +110,9 @@ def _execute_render_task(
             "aspect_ratio": aspect_ratio,
             "style": style or "general",
             "caption_style": caption_style,
+            "add_subtitle": add_subtitle,
+            "add_stickers": add_stickers,
+            "add_textoverlay": add_textoverlay,
             "rhythm_data": {},
             "visual_data": [],
             "edl": {},
@@ -121,11 +127,26 @@ def _execute_render_task(
             "pre_flight_report": {},
             "progress_callback": orchestrator_progress_callback,
             "clip_scores": {},
+            "has_cached_director": False,
         }
+
+        # Query project user info for user-specific caching
+        db = SessionLocal()
+        user_folder = "unknown_user"
+        try:
+            proj = db.query(Project).filter(Project.id == uuid.UUID(project_id)).first()
+            if proj and proj.user:
+                user_folder = proj.user.username or str(proj.user.id)
+        except Exception as e:
+            logger.warning(f"[Worker] Failed to query user info for cache path: {e}")
+        finally:
+            db.close()
 
         # Instantiate orchestrator
         orchestrator = ShortifyOrchestrator(
-            exports_dir=str(STORAGE_ROOT / "exports" / project_id)
+            exports_dir=str(STORAGE_ROOT / "exports" / project_id),
+            project_id=project_id,
+            user=user_folder
         )
         final_state = orchestrator.run(initial_state)
 
@@ -255,7 +276,10 @@ def enqueue_job(
     target_duration: int,
     aspect_ratio: str,
     style: str,
-    caption_style: str = "hormozi",
+    caption_style: str = "none",
+    add_subtitle: bool = True,
+    add_stickers: bool = True,
+    add_textoverlay: bool = True,
 ):
     """Enqueues a rendering task into the thread pool."""
     update_job(project_id, {
@@ -276,5 +300,8 @@ def enqueue_job(
         aspect_ratio=aspect_ratio,
         style=style,
         caption_style=caption_style,
+        add_subtitle=add_subtitle,
+        add_stickers=add_stickers,
+        add_textoverlay=add_textoverlay,
     )
     active_futures[project_id] = future

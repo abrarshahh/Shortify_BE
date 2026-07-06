@@ -56,10 +56,6 @@ def create_project(
         user_id=user.id,
         title=project_data.title,
         description=project_data.description,
-        target_duration=project_data.target_duration,
-        aspect_ratio=project_data.aspect_ratio,
-        style=project_data.style,
-        caption_style=project_data.caption_style
     )
     db.add(proj)
     db.commit()
@@ -180,3 +176,31 @@ def delete_project_hard(
     db.delete(project)
     db.commit()
     return {"message": "Project and its exclusive assets deleted successfully"}
+
+@router.delete("/{project_id}/cache")
+def delete_project_cache(
+    project_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(lambda: SessionLocal())
+):
+    """
+    Deletes all cached analyses (clip_scores, media_analysis, music_analysis, director_analysis, metadata)
+    for a specific project.
+    """
+    project = db.query(Project).filter(Project.id == project_id, Project.user_id == user.id).first()
+    if not project:
+        raise HTTPException(404, "Project not found")
+
+    user_folder = user.username or str(user.id)
+    cache_path = os.path.join("cache", user_folder, str(project_id))
+    
+    if os.path.exists(cache_path):
+        try:
+            shutil.rmtree(cache_path)
+            logger.info(f"Deleted cache folder for project {project_id}: {cache_path}")
+            return {"message": "Project cache successfully deleted."}
+        except Exception as e:
+            logger.error(f"Failed to delete project cache folder: {e}")
+            raise HTTPException(500, f"Failed to delete cache folder: {e}")
+    else:
+        return {"message": "No cache folder found for this project."}

@@ -68,8 +68,17 @@ def trigger_render(
     if project.is_rendering:
         raise HTTPException(409, f"Project '{project.title}' is already rendering. Please wait for it to complete.")
 
-    # Set rendering flag
+    req_style = body.style.value if (body.style and hasattr(body.style, 'value')) else body.style
+    req_aspect_ratio = body.aspect_ratio.value if hasattr(body.aspect_ratio, 'value') else body.aspect_ratio
+    req_target_duration = body.target_duration.value if hasattr(body.target_duration, 'value') else body.target_duration
+    req_caption_style = body.caption_style
+
+    # Set rendering flag and update project database record with the latest realtime render parameters
     project.is_rendering = True
+    project.target_duration = req_target_duration
+    project.aspect_ratio = req_aspect_ratio
+    project.style = req_style
+    project.caption_style = req_caption_style
     db.commit()
 
     # Build a combined creative brief so all AI stages receive the full
@@ -79,10 +88,11 @@ def trigger_render(
         project_context_parts.append(f"Project Title: {project.title}")
     if project.description:
         project_context_parts.append(f"Project Description: {project.description}")
-    project_context_parts.append(f"Project Style: {project.style or 'general'}")
-    project_context_parts.append(f"Aspect Ratio: {project.aspect_ratio or '9:16'}")
-    project_context_parts.append(f"Caption Style: {project.caption_style or 'hormozi'}")
-    project_context_parts.append(f"Target Duration: {project.target_duration} seconds")
+        
+    project_context_parts.append(f"Project Style: {req_style or 'general'}")
+    project_context_parts.append(f"Aspect Ratio: {req_aspect_ratio or '9:16'}")
+    project_context_parts.append(f"Caption Style: {req_caption_style or 'none'}")
+    project_context_parts.append(f"Target Duration: {req_target_duration} seconds")
     if body.prompt:
         project_context_parts.append(f"Render Instruction: {body.prompt}")
     enriched_prompt = "\n".join(project_context_parts)
@@ -93,10 +103,13 @@ def trigger_render(
         video_paths=video_paths,
         music_path=music_path,
         output_filename=body.output_filename,
-        target_duration=project.target_duration,
-        aspect_ratio=project.aspect_ratio,
-        style=project.style,
-        caption_style=project.caption_style or "hormozi",
+        target_duration=req_target_duration,
+        aspect_ratio=req_aspect_ratio,
+        style=req_style,
+        caption_style=req_caption_style or "none",
+        add_subtitle=body.add_subtitle,
+        add_stickers=body.add_stickers,
+        add_textoverlay=body.add_textoverlay,
     )
 
     return RenderResponse(

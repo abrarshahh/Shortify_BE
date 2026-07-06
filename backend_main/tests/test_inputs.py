@@ -42,16 +42,59 @@ def test_create_project():
     # 2. Create a project
     project_payload = {
         "title": "My Test Project",
-        "description": "Testing project creation API",
-        "target_duration": 30,
-        "aspect_ratio": "9:16",
-        "style": "cinematic"
+        "description": "Testing project creation API"
     }
     response = client.post("/projects", headers=headers, json=project_payload)
     assert response.status_code == 201
     proj = response.json()
     assert proj["title"] == "My Test Project"
-    assert proj["target_duration"] == 30
+    assert proj["target_duration"] == 15
     assert proj["aspect_ratio"] == "9:16"
-    assert proj["style"] == "cinematic"
     assert "id" in proj
+
+def test_delete_project_cache():
+    # 1. Sign up a new user
+    import os
+    import shutil
+    unique_id = uuid.uuid4().hex[:8]
+    username = f"user_{unique_id}"
+    email = f"user_{unique_id}@example.com"
+    signup_res = client.post("/signup", json={"username": username, "email": email, "password": "testpass"})
+    assert signup_res.status_code == 200
+    session_id = signup_res.json()["session_id"]
+    headers = {"Authorization": f"Bearer {session_id}"}
+
+    # 2. Create a project
+    project_payload = {
+        "title": "My Cache Project",
+        "description": "Testing cache deletion"
+    }
+    response = client.post("/projects", headers=headers, json=project_payload)
+    assert response.status_code == 201
+    proj = response.json()
+    project_id = proj["id"]
+
+    # 3. Create dummy cache directory and file
+    cache_path = os.path.join("cache", username, project_id)
+    os.makedirs(cache_path, exist_ok=True)
+    dummy_file = os.path.join(cache_path, "director_analysis.json")
+    with open(dummy_file, "w") as f:
+        f.write("{}")
+    
+    assert os.path.exists(dummy_file)
+
+    # 4. Trigger cache deletion endpoint
+    del_res = client.delete(f"/projects/{project_id}/cache", headers=headers)
+    assert del_res.status_code == 200
+    assert del_res.json()["message"] == "Project cache successfully deleted."
+
+    # 5. Verify folder was deleted
+    assert not os.path.exists(cache_path)
+
+    # Clean up empty parent folders
+    user_cache_dir = os.path.dirname(cache_path)
+    if os.path.exists(user_cache_dir) and not os.listdir(user_cache_dir):
+        os.rmdir(user_cache_dir)
+    cache_root = os.path.dirname(user_cache_dir)
+    if os.path.exists(cache_root) and not os.listdir(cache_root):
+        os.rmdir(cache_root)

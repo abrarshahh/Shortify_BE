@@ -63,6 +63,7 @@ EDL_JSON_SCHEMA = {
                             "vignette_strength": {"type": "number", "minimum": 0.0, "maximum": 1.0},
                             "vignette_radius": {"type": "number", "minimum": 0.0, "maximum": 2.0}
                         },
+                        "required": ["brightness", "contrast", "gamma", "saturation", "vibrance", "hue", "temperature", "vignette_strength", "vignette_radius"],
                         "additionalProperties": False
                     },
                     "audio_ducking": {
@@ -131,7 +132,7 @@ EDL_JSON_SCHEMA = {
                 },
                 "required": [
                     "clip_name", "start_in_clip", "end_in_clip",
-                    "timeline_start", "timeline_end", "transition", "text_overlay", "details"
+                    "timeline_start", "timeline_end", "transition", "text_overlay", "color_grade", "details"
                 ],
                 "additionalProperties": False
             }
@@ -660,7 +661,7 @@ class CreativeDirector:
             - Otherwise -> speed is 1.0 (effective duration = end_in_clip - start_in_clip)
           The sum of these effective durations must be exactly {target_duration} seconds.
           PREFER PACING STYLE OVER PRESETS: Unless the user prompt explicitly requests custom speed presets like constant fast/slow or ramping, do NOT set `speed_preset` or `speed_keyframes` (leave them empty or null). Just set details.pacing_style to 'speed-ramp' or 'cinematic-slow' and let the pacing speeds apply automatically. This keeps the duration calculations simple.
-        - DURATION MATCH: Ensure 'timeline_end - timeline_start' is exactly equal to 'end_in_clip - start_in_clip' for each clip.
+        - DURATION MATCH: Ensure 'timeline_end - timeline_start' is exactly equal to the effective duration: '(end_in_clip - start_in_clip) / speed' for each clip.
         - MUSIC SELECTION: Use 'music_start_offset' to pick a good starting point from the audio track (e.g., an energy segment).
         - DYNAMIC ELEMENTS & STYLES SELECTION: You MUST select and tailor transitions, pacing_style, text_overlay, effect_type, effect_query, sticker_query, and sticker_position dynamically based on the user's prompt and intention. Do not use generic defaults if the prompt indicates a specific vibe (e.g. if they ask for a 'scary video', use 'smoke'/'fog' effects, 'ghost'/'scared' stickers, and glitch/dip_to_black transitions; if a 'hype/gym video', use 'particles'/'sparks' effects, 'fire'/'subscribe' stickers, and fast_cut/speed-ramp pacing).
         - TEXT OVERLAYS: You, as the viral video analyst, must decide which key moments or scene transitions would benefit from on-screen text overlays (title cards, main hooks, call-to-actions, or section headers) based on the user's prompt theme. For each timeline clip, determine if a short, punchy text overlay (1-4 words) fits the scene, and if so, write it in the 'text_overlay' field. Do not include subtitles of dialogue here (subtitles are processed separately). Use text overlays strategically to capture and keep viewer attention.
@@ -688,11 +689,18 @@ class CreativeDirector:
             - light_leak: `{{"color": "white | orange | red | blue", "intensity": float}}`
             - spin: `{{"angle_delta": float, "zoom_scale": float}}`
             - ripple: `{{"wave_frequency": float, "wave_amplitude": float}}`
-        - COLOR GRADING: You can optionally set `"color_grade"` per timeline item to enhance the mood and aesthetic. Use parameters within their allowed ranges:
-          - brightness (0.5 to 1.8) & contrast (0.5 to 2.0).
-          - saturation (0.0 to 2.0) & vibrance (0.0 to 2.0): use higher values for high-energy/hooks, low/zero values for moody/B&W.
-          - temperature (-50.0 to 50.0): positive values make the clip warm/golden hour, negative values make it cool/moody.
-          - vignette_strength (0.0 to 1.0) & vignette_radius (0.0 to 2.0): use to draw focus towards the center.
+        - COLOR GRADING: You MUST define the `color_grade` object for every timeline item, acting as a professional editor. Reason over each clip's `avg_brightness` (exposure score), `face_detected`, and the overall project style/vibe to set optimal parameters:
+          - Brightness & Exposure Correction:
+            - If `avg_brightness` is low (e.g. < 90), the clip is dark/underexposed: you MUST boost `brightness` (1.1 to 1.3), increase `contrast` (1.1 to 1.25), and lift `gamma` (1.05 to 1.3) to recover shadow detail.
+            - If `avg_brightness` is high (e.g. > 165), the clip is bright/overexposed: you MUST reduce `brightness` (0.85 to 0.95) and decrease `gamma` (0.8 to 0.95) to preserve highlight details.
+          - Style & Aesthetic Enhancements:
+            - Cinematic: Set `temperature` (+5.0 to +15.0) for warmth, `contrast` (1.1 to 1.25) for depth, `vibrance` (0.9 to 0.95) for rich tones, and a subtle vignette (vignette_strength: 0.1 to 0.25).
+            - Travel / Vibrant: Set `saturation` (1.15 to 1.35) and `vibrance` (1.2 to 1.4) high, with warm `temperature` (+10.0 to +20.0).
+            - Tech / Cool / Clean: Set `temperature` (-5.0 to -15.0) for cool/blue tones, and sharp contrast (1.15 to 1.35).
+            - Moody / Noir: Set `contrast` (1.3 to 1.6) high, `saturation` (0.1 to 0.4) very low, `temperature` (-10.0 to -25.0) cool, and apply a heavy vignette (vignette_strength: 0.35 to 0.6).
+          - Face Preservation: If `face_detected` is true, avoid extreme temperature/hue shifts that make skin look unnatural. Prefer boosting `vibrance` instead of raw `saturation` to preserve skin realism.
+          - Aesthetic Continuity: Ensure that sequential clips of the same setting share similar or smoothly transitioning grading settings for continuity.
+          - Allowed ranges: brightness (0.5 to 1.8), contrast (0.5 to 2.0), gamma (0.1 to 10.0), saturation (0.0 to 2.0), vibrance (0.0 to 2.0), hue (-180.0 to 180.0), temperature (-50.0 to 50.0), vignette_strength (0.0 to 1.0), vignette_radius (0.0 to 2.0). All fields must be explicitly populated.
         - SPEED RAMPING & MOTION: You can alter the time mapping of a clip.
           - Option A: Set `"speed_preset"` to one of:
             - `"constant_fast"` (flat 2.0x speed)

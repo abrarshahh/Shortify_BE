@@ -585,15 +585,13 @@ def test_media_analyst_cache_ttl(tmp_path, monkeypatch):
     assert res["summary"] == "This is a cached summary"
     assert not called_upload  # Cache hit, no upload called!
 
-    # 2. Second test: cache is stale (8 days old)
+    # 2. Second test: cache is stale (8 days old) but stored forever
     eight_days_ago = time.time() - 8 * 24 * 3600
     os.utime(cache_path, (eight_days_ago, eight_days_ago))
     
     res_stale = analyst.analyze_video(str(src_file))
-    assert called_upload  # Expired cache, so upload was called!
-    assert os.path.exists(cache_path)
-    # The cache file should now be freshly written (modification time close to current time, not 8 days ago)
-    assert os.path.getmtime(cache_path) > time.time() - 10
+    assert res_stale["summary"] == "This is a cached summary"
+    assert not called_upload  # Expired cache TTL is disabled, so still no upload called!
 
 
 def test_media_analyst_upload_retry(tmp_path, monkeypatch):
