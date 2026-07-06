@@ -1,6 +1,6 @@
 import json
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -8,13 +8,41 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 class TransitionType(str, Enum):
     none = "none"
     jump_cut = "jump_cut"
+    fade = "fade"
     crossfade = "crossfade"
     dip_to_black = "dip_to_black"
+    fade_to_white = "fade_to_white"
     slide_left = "slide_left"
     slide_right = "slide_right"
+    slide_up = "slide_up"
+    slide_down = "slide_down"
+    slide_push = "slide_push"
+    wipe_left = "wipe_left"
+    wipe_right = "wipe_right"
+    wipe_up = "wipe_up"
+    wipe_down = "wipe_down"
+    wipe_diagonal_tl = "wipe_diagonal_tl"
+    wipe_diagonal_tr = "wipe_diagonal_tr"
+    wipe_diagonal_bl = "wipe_diagonal_bl"
+    wipe_diagonal_br = "wipe_diagonal_br"
+    split_horizontal = "split_horizontal"
+    split_vertical = "split_vertical"
+    iris = "iris"
+    iris_circle = "iris_circle"
+    diamond = "diamond"
+    heart = "heart"
+    blinds_horizontal = "blinds_horizontal"
+    blinds_vertical = "blinds_vertical"
+    checkerboard = "checkerboard"
+    clock_wipe = "clock_wipe"
     zoom_in = "zoom_in"
     zoom_out = "zoom_out"
     glitch = "glitch"
+    pixelate = "pixelate"
+    spin = "spin"
+    ripple = "ripple"
+    blur = "blur"
+    light_leak = "light_leak"
 
 
 class PacingStyle(str, Enum):
@@ -37,6 +65,27 @@ class EDLClipDetails(BaseModel):
     sticker_position: Optional[str] = "bottom-center"
 
 
+class ColorGradeParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    brightness: float = Field(1.0, ge=0.5, le=1.8)
+    contrast: float = Field(1.0, ge=0.5, le=2.0)
+    gamma: float = Field(1.0, ge=0.1, le=10.0)
+    saturation: float = Field(1.0, ge=0.0, le=2.0)
+    vibrance: float = Field(1.0, ge=0.0, le=2.0)
+    hue: float = Field(0.0, ge=-180.0, le=180.0)
+    temperature: float = Field(0.0, ge=-50.0, le=50.0)
+    vignette_strength: float = Field(0.0, ge=0.0, le=1.0)
+    vignette_radius: float = Field(0.75, ge=0.0, le=2.0)
+
+
+class AudioDuckingParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    original_audio_volume: float = Field(1.0, ge=0.0, le=1.0)
+    music_volume_during_segment: float = Field(0.22, ge=0.0, le=1.0)
+
+
 class EDLTimelineItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -46,7 +95,21 @@ class EDLTimelineItem(BaseModel):
     timeline_start: float = Field(ge=0)
     timeline_end: float = Field(ge=0)
     transition: TransitionType
+    transition_params: Optional[Dict[str, Any]] = None
+    color_grade: Optional[ColorGradeParams] = None
+    audio_ducking: Optional[AudioDuckingParams] = None
+    speed_preset: Optional[str] = None
+    speed_keyframes: Optional[List[Tuple[float, float]]] = None
+    reverse: Optional[bool] = False
+    stabilize: Optional[bool] = False
+    stabilize_strength: Optional[float] = Field(0.5, ge=0.0, le=1.0)
     text_overlay: str = ""
+    text_preset: Optional[str] = None
+    text_animation: Optional[str] = None
+    sticker_animation: Optional[str] = None
+    sticker_path: Optional[str] = None
+    sticker_position: Optional[str] = None
+    effect_path: Optional[str] = None
     details: EDLClipDetails
 
     @model_validator(mode="after")
@@ -55,6 +118,50 @@ class EDLTimelineItem(BaseModel):
             raise ValueError("start_in_clip must be less than end_in_clip")
         if self.timeline_end <= self.timeline_start:
             raise ValueError("timeline_end must be greater than timeline_start")
+            
+        if self.speed_preset and self.speed_keyframes:
+            raise ValueError("speed_preset and speed_keyframes are mutually exclusive; you cannot specify both.")
+        
+        if self.speed_preset:
+            valid_presets = {"constant_fast", "constant_slow", "ramp_up", "ramp_down", "speed_bump", "freeze_frame"}
+            if self.speed_preset not in valid_presets:
+                raise ValueError(f"Invalid speed_preset '{self.speed_preset}'. Must be one of: {', '.join(valid_presets)}")
+                
+        if self.speed_keyframes:
+            if len(self.speed_keyframes) < 2:
+                raise ValueError("speed_keyframes must contain at least 2 points.")
+            
+            prev_x = -1.0
+            for i, point in enumerate(self.speed_keyframes):
+                if len(point) != 2:
+                    raise ValueError(f"Keyframe at index {i} must be a Tuple of (time_fraction, speed_multiplier).")
+                x, s = point
+                if not (0.0 <= x <= 1.0):
+                    raise ValueError(f"Keyframe time fraction at index {i} must be in [0.0, 1.0]. Got {x}")
+                if s <= 0.0:
+                    raise ValueError(f"Keyframe speed multiplier at index {i} must be positive. Got {s}")
+                if x < prev_x:
+                    raise ValueError("speed_keyframes must be sorted in ascending order of time fraction.")
+                prev_x = x
+            
+            if self.speed_keyframes[0][0] != 0.0 or self.speed_keyframes[-1][0] != 1.0:
+                raise ValueError("speed_keyframes must start at time fraction 0.0 and end at 1.0.")
+                
+        if self.text_preset:
+            valid_text_presets = {"bold_hype", "classic_clean", "neon_glow", "minimal_pop"}
+            if self.text_preset not in valid_text_presets:
+                raise ValueError(f"Invalid text_preset '{self.text_preset}'. Must be one of: {', '.join(valid_text_presets)}")
+                
+        if self.text_animation:
+            valid_anims = {"none", "fade", "slide_up", "slide_down", "slide_left", "slide_right"}
+            if self.text_animation not in valid_anims:
+                raise ValueError(f"Invalid text_animation '{self.text_animation}'. Must be one of: {', '.join(valid_anims)}")
+                
+        if self.sticker_animation:
+            valid_anims = {"none", "fade", "slide_up", "slide_down", "slide_left", "slide_right"}
+            if self.sticker_animation not in valid_anims:
+                raise ValueError(f"Invalid sticker_animation '{self.sticker_animation}'. Must be one of: {', '.join(valid_anims)}")
+                
         return self
 
 

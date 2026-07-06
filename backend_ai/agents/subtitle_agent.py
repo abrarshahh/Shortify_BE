@@ -69,7 +69,7 @@ class SubtitleAgent:
     # Public API
     # ------------------------------------------------------------------
 
-    def transcribe(self, video_path: str) -> Dict[str, Any]:
+    def transcribe(self, video_path: str, style_name: Optional[str] = None) -> Dict[str, Any]:
         """
         Transcribes audio from a video file using local Whisper.
 
@@ -93,7 +93,7 @@ class SubtitleAgent:
         )
 
         segments = result.get("segments", [])
-        captions = self._build_captions(segments)
+        captions = self._build_captions(segments, style_name=style_name)
 
         return {
             "full_text": result.get("text", "").strip(),
@@ -143,7 +143,8 @@ class SubtitleAgent:
                 "back_color": "none",
                 "position_y_ratio": 0.85,
                 "uppercase": False,
-                "animate": False
+                "animate": False,
+                "chunking_strategy": "punctuation_aware"
             },
             "bold": {
                 "font_size": 52,
@@ -153,7 +154,8 @@ class SubtitleAgent:
                 "back_color": "none",
                 "position_y_ratio": 0.80,
                 "uppercase": True,
-                "animate": False
+                "animate": False,
+                "chunking_strategy": "fixed_word_count"
             },
             "outline": {
                 "font_size": 64,
@@ -163,7 +165,8 @@ class SubtitleAgent:
                 "back_color": "none",
                 "position_y_ratio": 0.80,
                 "uppercase": True,
-                "animate": False
+                "animate": False,
+                "chunking_strategy": "fixed_word_count"
             },
             "hormozi": {
                 "font_size": 44,
@@ -175,7 +178,8 @@ class SubtitleAgent:
                 "shadow_width": 2,
                 "position_y_ratio": 0.80,
                 "uppercase": True,
-                "animate": True
+                "animate": True,
+                "chunking_strategy": "single_word"
             },
             "subtitle": {
                 "font_size": 28,
@@ -184,7 +188,8 @@ class SubtitleAgent:
                 "back_color": "black",
                 "position_y_ratio": 0.90,
                 "uppercase": False,
-                "animate": False
+                "animate": False,
+                "chunking_strategy": "fixed_word_count"
             }
         }
 
@@ -288,6 +293,17 @@ class SubtitleAgent:
             line_height = int(cfg_font_size * 1.3)
             total_height = N * line_height
             y_center = frame_height * cfg_position_y_ratio
+            
+            # Safe-zone pre-check: prevent overflow into bottom safe zone
+            max_bottom = frame_height - SAFE_ZONE["bottom_px"]
+            if y_center + total_height / 2 > max_bottom:
+                original_y = y_center
+                y_center = max_bottom - total_height / 2
+                logger.info(
+                    f"Safe-Zone Pre-check: Adjusted subtitle y_center from {original_y} to {y_center} "
+                    f"to prevent bottom safe-zone overflow (height: {total_height}px, max_bottom: {max_bottom}px)"
+                )
+                
             y_start = y_center - (total_height / 2)
 
             for i, line_words in enumerate(lines):
@@ -404,7 +420,7 @@ class SubtitleAgent:
 
         try:
             cmd = [
-                "ffmpeg", "-y",
+                "ffmpeg", "-y", "-nostdin",
                 "-i", video_path,
                 "-filter_script:v", temp_filter,
                 "-c:v", "libx264",
@@ -414,7 +430,7 @@ class SubtitleAgent:
                 output_path
             ]
             logger.info(f"burn_subtitles: Running FFmpeg command with filter script: {' '.join(cmd)}")
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL)
             if result.returncode != 0:
                 logger.error(f"FFmpeg subtitle burn failed with exit code {result.returncode}")
                 logger.error(f"FFmpeg stderr: {result.stderr}")
@@ -507,66 +523,75 @@ class SubtitleAgent:
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _build_captions(self, segments: List[Dict]) -> List[Dict[str, Any]]:
+    def _build_captions(self, segments: List[Dict], style_name: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        Converts Whisper segments into a caption list with start/end/text.
-        Groups words into short phrases (max 6 words) for readability.
+        Converts Whisper segments into a caption list using style-specific chunking strategy.
         """
-        captions = []
+        # Flat list of all words from all segments
+        all_words = []
         for seg in segments:
             words = seg.get("words", [])
             if not words:
-                text_clean = seg["text"].strip()
+                # If no word-level timestamps (e.g. Whisper model is too old or failed), synthesize word timings from segment text
+                text_clean = seg.get("text", "").strip()
                 words_list = text_clean.split()
                 if words_list:
                     dur = seg["end"] - seg["start"]
                     word_dur = dur / len(words_list)
-                    chunk_words = []
                     for idx, w in enumerate(words_list):
                         w_start = seg["start"] + idx * word_dur
                         w_end = w_start + word_dur
-                        chunk_words.append({
+                        all_words.append({
                             "word": w,
                             "start": round(w_start, 2),
                             "end": round(w_end, 2)
                         })
-                    captions.append({
-                        "start": round(seg["start"], 2),
-                        "end":   round(seg["end"],   2),
-                        "text":  text_clean,
-                        "words": chunk_words
-                    })
-                else:
-                    captions.append({
-                        "start": round(seg["start"], 2),
-                        "end":   round(seg["end"],   2),
-                        "text":  text_clean,
-                        "words": []
-                    })
-                continue
-
-            # Group into chunks of up to 6 words
-            chunk_size = 6
-            for i in range(0, len(words), chunk_size):
-                chunk = words[i: i + chunk_size]
-                text  = " ".join(w["word"].strip() for w in chunk)
-                start = round(chunk[0]["start"], 2)
-                end   = round(chunk[-1]["end"],  2)
-                chunk_words = [
-                    {
+            else:
+                for w in words:
+                    all_words.append({
                         "word": w["word"].strip(),
                         "start": round(w["start"], 2),
                         "end": round(w["end"], 2)
-                    }
-                    for w in chunk
-                ]
-                if text:
-                    captions.append({
-                        "start": start,
-                        "end": end,
-                        "text": text,
-                        "words": chunk_words
                     })
+
+        if not all_words:
+            return []
+
+        # Resolve chunking config based on style name
+        style_name = style_name or self.caption_style
+        
+        # Load active style cfg to extract strategy
+        from backend_ai.core.config_loader import AGENTS_CONFIG
+        styles_from_config = AGENTS_CONFIG.get("caption_styles", {})
+        
+        # Fallback default styles config
+        DEFAULT_STYLES_CHUNK = {
+            "minimal": {"chunking_strategy": "punctuation_aware"},
+            "bold": {"chunking_strategy": "fixed_word_count"},
+            "outline": {"chunking_strategy": "fixed_word_count"},
+            "hormozi": {"chunking_strategy": "single_word"},
+            "subtitle": {"chunking_strategy": "fixed_word_count"}
+        }
+        
+        style_cfg = styles_from_config.get(style_name) or DEFAULT_STYLES_CHUNK.get(style_name, DEFAULT_STYLES_CHUNK["hormozi"])
+        
+        strategy = style_cfg.get("chunking_strategy", "fixed_word_count")
+        max_words = int(style_cfg.get("max_words", 6))
+        max_duration = float(style_cfg.get("max_duration", 2.5))
+        
+        # Fallback values for default presets if strategy not defined in config
+        if "chunking_strategy" not in style_cfg:
+            strategy_defaults = {
+                "minimal": "punctuation_aware",
+                "bold": "fixed_word_count",
+                "outline": "fixed_word_count",
+                "hormozi": "single_word",
+                "subtitle": "fixed_word_count"
+            }
+            strategy = strategy_defaults.get(style_name, "fixed_word_count")
+
+        from backend_ai.effects.caption_chunking import chunk_words
+        return chunk_words(all_words, strategy, max_words=max_words, max_duration=max_duration)
 
         return captions
 
@@ -582,15 +607,10 @@ class SubtitleAgent:
         """
         import os
         import json
-        from groq import Groq
+        from backend_ai.core.api_utils import get_gemini_client
         from backend_ai.core.config_loader import AGENTS_CONFIG
         
-        api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            logger.warning("GROQ_API_KEY not found in SubtitleAgent; falling back to default style.")
-            return {}
-            
-        client = Groq(api_key=api_key)
+        client = get_gemini_client()
         
         system_prompt = (
             "You are a typography and video style expert. Given a video project's title/prompt, storyline, and style, "
@@ -642,15 +662,17 @@ class SubtitleAgent:
         )
         
         try:
-            chat_completion = client.chat.completions.create(
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_msg}
-                ],
-                model=AGENTS_CONFIG.get("creative_director", {}).get("model", "llama-3.3-70b-versatile"),
-                response_format={"type": "json_object"}
+            from google.genai import types
+            model_id = AGENTS_CONFIG.get("creative_director", {}).get("model", "gemini-2.5-flash")
+            response = client.models.generate_content(
+                model=model_id,
+                contents=user_msg,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    response_mime_type="application/json"
+                )
             )
-            response_text = chat_completion.choices[0].message.content
+            response_text = response.text
             style_data = json.loads(response_text)
             logger.info(f"Dynamic subtitle style generated: {style_data}")
             return style_data

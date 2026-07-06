@@ -7,7 +7,7 @@ from google.genai import types
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 from backend_ai.core.config_loader import AGENTS_CONFIG
-from backend_ai.core.api_utils import rate_limit_guard
+from backend_ai.core.api_utils import rate_limit_guard, get_gemini_client
 from backend_main.media_metadata import extract_media_metadata
 
 load_dotenv()
@@ -15,19 +15,15 @@ logger = logging.getLogger("agents.media")
 
 class MediaAnalyst:
     def __init__(self):
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError("GEMINI_API_KEY not found in environment variables")
-        
-        # New Google GenAI SDK Client
-        self.client = genai.Client(api_key=api_key)
+        # New Google GenAI SDK Client with transparent key rotation
+        self.client = get_gemini_client()
         # Configuration from agents_config.yaml
         config = AGENTS_CONFIG.get("media_analyst", {})
         self.primary_model = config.get("primary_model", "gemini-1.5-flash")
         self.fallback_models = config.get("fallback_models", ["gemini-1.5-flash-8b"])
         
         # Cache configuration
-        self.cache_dir = "data/cache/media_analysis"
+        self.cache_dir = "cache/shared/media_analysis"
         os.makedirs(self.cache_dir, exist_ok=True)
 
     def _get_cache_path(self, file_path: str) -> str:
@@ -131,35 +127,30 @@ class MediaAnalyst:
         return result
 
     @rate_limit_guard(max_retries=5)
-    def analyze_video(self, file_path: str) -> Dict[str, Any]:
+    def analyze_video(self, file_path: str, user_prompt: str = "") -> Dict[str, Any]:
         """
         Uploads a video to Gemini and analyzes it for key segments, hooks, and mood.
         Using the new google-genai SDK.
+
+        user_prompt: The combined creative brief (project title + description +
+        render instruction). When provided, Gemini is instructed to prioritize
+        segments matching the creator's goal (e.g. face-visible people clips when
+        the prompt mentions 'me', 'us', etc.) rather than scoring on generic
+        visual interest alone.
         """
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Video file not found: {file_path}")
 
-        # Check Cache with 7-day TTL check
+        # Check Cache (stored forever, no expiration check)
         cache_path = self._get_cache_path(file_path)
         if os.path.exists(cache_path):
-            cache_mtime = os.path.getmtime(cache_path)
-            age_seconds = time.time() - cache_mtime
-            seven_days_seconds = 7 * 24 * 3600
-            
-            if age_seconds > seven_days_seconds:
-                logger.info(f"MediaAnalyst: Cache has expired (age: {age_seconds / 3600:.1f} hours > 7 days). Invalidating cache.")
-                try:
-                    os.remove(cache_path)
-                except Exception as ex:
-                    logger.warning(f"MediaAnalyst: Could not delete expired cache file: {ex}")
-            else:
-                logger.info(f"MediaAnalyst: Found cached analysis for: {file_path}")
-                try:
-                    with open(cache_path, "r") as f:
-                        cached_data = json.load(f)
-                    return self._normalize_analysis_durations(cached_data, cache_path)
-                except Exception as e:
-                    logger.error(f"MediaAnalyst: Error reading cache: {e}")
+            logger.info(f"MediaAnalyst: Found cached analysis for: {file_path}")
+            try:
+                with open(cache_path, "r") as f:
+                    cached_data = json.load(f)
+                return self._normalize_analysis_durations(cached_data, cache_path)
+            except Exception as e:
+                logger.error(f"MediaAnalyst: Error reading cache: {e}")
 
         file_metadata = self._get_file_metadata(file_path)
         is_image = file_metadata.get("media_type") == "photo"
@@ -208,28 +199,53 @@ class MediaAnalyst:
 
             logger.info(f"MediaAnalyst: Video processed successfully. Name on Gemini: {video_file.name}")
 
+            # Build a creator-goal preamble injected into both image and video prompts.
+            # This is what fixes the root cause: without this, Gemini scores segments on
+            # generic visual interest (mountains > people) rather than on what the creator
+            # actually asked for.
+            if user_prompt.strip():
+                goal_preamble = f"""
+CREATOR'S GOAL:
+\"\"\"{user_prompt}\"\"\"
+
+When scoring segments, apply these PRIORITY RULES:
+1. If the goal mentions the creator or people ('me', 'us', 'we', 'I', 'myself', 'ourselves',
+   or any person's name), segments where a person / face is prominently visible and active
+   (talking to camera, performing an action, clearly in frame) MUST receive:
+   - priority_score >= 8.0
+   - is_hook = true (for the best face-visible moment)
+   These segments are the MOST IMPORTANT regardless of visual aesthetics.
+2. Segments that directly match the creator's stated action, location, or subject receive
+   priority_score >= 7.0.
+3. Generic B-roll (landscapes, objects with no person) receives priority_score <= 5.0
+   UNLESS the goal specifically asks for scenery/nature content.
+"""
+            else:
+                goal_preamble = ""
+
             if is_image:
-                prompt = """
+                prompt = f"""
                 Analyze this photo for a short-form content editor.
+                {goal_preamble}
 
                 Output MUST be a valid JSON object with the following structure:
-                {
+                {{
                   "summary": "Detailed description of the photo content",
                   "mood": "Visual mood (e.g., Energetic, Calm, Dark, Vibrant)",
                   "lighting": "Description of lighting conditions",
                   "subjects": ["List of main subjects or objects visible"],
-                  "inferred_metadata": {
+                  "inferred_metadata": {{
                      "inferred_location": "Inferred location if applicable",
                      "time_of_day": "Inferred time of day",
                      "camera_movement": "static"
-                  },
-                  "audio": {
+                  }},
+                  "audio": {{
                      "captions": [],
                      "audio_mood": "none",
                      "audio_features": "none"
-                  },
+                  }},
                   "interesting_segments": [
-                    {
+                    {{
                       "start": 0.0,
                       "end": 3.0,
                       "description": "The entire photo — describe the most visually compelling aspect",
@@ -238,10 +254,10 @@ class MediaAnalyst:
                       "is_hook": true,
                       "should_be_used": true,
                       "segment_focus": "one word describing the main subject"
-                    }
+                    }}
                   ],
                   "all_segments": [
-                    {
+                    {{
                       "start": 0.0,
                       "end": 3.0,
                       "description": "Full description of the photo",
@@ -249,59 +265,60 @@ class MediaAnalyst:
                       "priority_score": 8.0,
                       "should_be_used": true,
                       "segment_focus": "one word describing the main subject"
-                    }
+                    }}
                   ]
-                }
+                }}
 
                 Important: Only return the raw JSON object. No markdown.
                 """
             else:
-                prompt = """
+                prompt = f"""
                 Analyze this video for a short-form content editor. Listen to the audio track and watch the visual track carefully.
-                
+                {goal_preamble}
+
                 Output MUST be a valid JSON object with the following structure:
-                {
+                {{
                   "summary": "Complete and detailed summary of the entire video content",
                   "mood": "Overall visual and thematic mood (e.g., Energetic, Calm, Dark, Vibrant)",
                   "lighting": "Detailed description of lighting conditions",
                   "subjects": ["Detailed list of main subjects, people, or objects in the video"],
-                  "inferred_metadata": {
+                  "inferred_metadata": {{
                      "inferred_location": "Inferred location if applicable",
                      "time_of_day": "Inferred time of day",
                      "camera_movement": "Description of camera movement (e.g., static, handheld, panning)"
-                  },
-                  "audio": {
+                  }},
+                  "audio": {{
                      "captions": ["List of transcribed spoken sentences/captions extracted from the audio, if any. Keep chronological."],
                      "audio_mood": "Overall mood of the audio/music/speech",
                      "audio_features": "Description of audio elements (e.g., background noise, music genre, sound effects)"
-                  },
+                  }},
                   "interesting_segments": [
-                    {
-                      "start": float (start time of the segment in seconds, e.g., 12.5),
-                      "end": float (end time of the segment in seconds, e.g., 18.0),
-                      "description": "Why this segment is visually or audibly interesting",
-                      "priority_score": float (1-10, rate the overall value/importance of this segment),
-                      "energy_score": float (0-1),
-                      "is_hook": boolean,
-                      "should_be_used": boolean,
+                    {{
+                      "start": "float (start time of the segment in seconds, e.g., 12.5)",
+                      "end": "float (end time of the segment in seconds, e.g., 18.0)",
+                      "description": "Why this segment is visually or audibly interesting — MUST mention if a person/face is visible",
+                      "priority_score": "float (1-10, apply creator goal priority rules above)",
+                      "energy_score": "float (0-1)",
+                      "is_hook": "boolean",
+                      "should_be_used": "boolean",
                       "segment_focus": "string (STRICTLY ONE SINGLE WORD describing the main focus, e.g., mountain, person, river, snow)"
-                    }
+                    }}
                   ],
                   "all_segments": [
-                    {
-                      "start": float (start time of the segment in seconds, e.g., 0.0),
-                      "end": float (end time of the segment in seconds, e.g., 5.5),
-                      "description": "Detailed visual description of what is happening in this segment",
+                    {{
+                      "start": "float (start time of the segment in seconds, e.g., 0.0)",
+                      "end": "float (end time of the segment in seconds, e.g., 5.5)",
+                      "description": "Detailed visual description — MUST note if a person/face is prominently visible",
                       "audio_description": "What is heard in this segment",
-                      "priority_score": float (1-10, rate the overall aesthetic and narrative value of this segment),
-                      "should_be_used": boolean (True if this segment is highly recommended for the final video),
+                      "priority_score": "float (1-10, apply creator goal priority rules above)",
+                      "should_be_used": "boolean (True if this segment is highly recommended for the final video)",
                       "segment_focus": "string (STRICTLY ONE SINGLE WORD describing the main subject or theme)"
-                    }
+                    }}
                   ]
-                }
-                
+                }}
+
                 Important Instructions:
-                1. "all_segments": Break the ENTIRE video down into chronological, sequential segments. Let the natural action dictate the duration of each segment. Segment the video at natural boundaries such as camera cuts, changes in scene, or major shifts in action/subject. A segment can be short or long depending on the action. Give each segment a priority_score based on how useful it would be for a highlight reel. All start and end values MUST be in raw seconds, not minutes or MM.SS format.
+                1. "all_segments": Break the ENTIRE video down into chronological, sequential segments. Let the natural action dictate the duration of each segment. Segment the video at natural boundaries such as camera cuts, changes in scene, or major shifts in action/subject. A segment can be short or long depending on the action. Give each segment a priority_score based on how useful it would be for a highlight reel — APPLY the creator goal priority rules above. All start and end values MUST be in raw seconds, not minutes or MM.SS format.
                 2. "captions": Accurately transcribe any speech heard in the video into the captions list.
                 3. Do not include any markdown formatting or extra text. Only return the raw JSON object.
                 """

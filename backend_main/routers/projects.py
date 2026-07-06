@@ -38,6 +38,7 @@ def list_all_projects(
                 target_duration=proj.target_duration,
                 aspect_ratio=proj.aspect_ratio,
                 style=proj.style,
+                caption_style=proj.caption_style,
                 created_at=proj.created_at,
                 render_status=job.get("status", "not_started"),
             )
@@ -55,9 +56,6 @@ def create_project(
         user_id=user.id,
         title=project_data.title,
         description=project_data.description,
-        target_duration=project_data.target_duration,
-        aspect_ratio=project_data.aspect_ratio,
-        style=project_data.style
     )
     db.add(proj)
     db.commit()
@@ -70,6 +68,7 @@ def create_project(
         target_duration=proj.target_duration,
         aspect_ratio=proj.aspect_ratio,
         style=proj.style,
+        caption_style=proj.caption_style,
         music_id=str(proj.music_id) if proj.music_id else None,
         created_at=proj.created_at
     )
@@ -102,7 +101,6 @@ def get_project_details(
                 extra_metadata=asset.extra_metadata,
                 uploaded_at=asset.uploaded_at
             ))
-            
     return ProjectDetailResponse(
         id=str(project.id),
         title=project.title,
@@ -110,6 +108,7 @@ def get_project_details(
         target_duration=project.target_duration,
         aspect_ratio=project.aspect_ratio,
         style=project.style,
+        caption_style=project.caption_style,
         music_id=str(project.music_id) if project.music_id else None,
         created_at=project.created_at,
         media=media_list
@@ -126,9 +125,7 @@ def delete_project_soft(
     if not project:
         raise HTTPException(404, "Project not found")
         
-    # Remove relations
     db.query(ProjectMediaAsset).filter(ProjectMediaAsset.project_id == project_id).delete()
-    
     db.delete(project)
     db.commit()
     return {"message": "Project deleted (files preserved)"}
@@ -171,7 +168,7 @@ def delete_project_hard(
             db.delete(asset)
         
     # 4. Remove export directory (output video)
-    export_dir = STORAGE_ROOT / "exports" / project_id
+    export_dir = STORAGE_ROOT / "exports" / str(project_id)
     if export_dir.exists() and export_dir.is_dir():
         shutil.rmtree(export_dir)
         
@@ -179,3 +176,31 @@ def delete_project_hard(
     db.delete(project)
     db.commit()
     return {"message": "Project and its exclusive assets deleted successfully"}
+
+@router.delete("/{project_id}/cache")
+def delete_project_cache(
+    project_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(lambda: SessionLocal())
+):
+    """
+    Deletes all cached analyses (clip_scores, media_analysis, music_analysis, director_analysis, metadata)
+    for a specific project.
+    """
+    project = db.query(Project).filter(Project.id == project_id, Project.user_id == user.id).first()
+    if not project:
+        raise HTTPException(404, "Project not found")
+
+    user_folder = user.username or str(user.id)
+    cache_path = os.path.join("cache", user_folder, str(project_id))
+    
+    if os.path.exists(cache_path):
+        try:
+            shutil.rmtree(cache_path)
+            logger.info(f"Deleted cache folder for project {project_id}: {cache_path}")
+            return {"message": "Project cache successfully deleted."}
+        except Exception as e:
+            logger.error(f"Failed to delete project cache folder: {e}")
+            raise HTTPException(500, f"Failed to delete cache folder: {e}")
+    else:
+        return {"message": "No cache folder found for this project."}

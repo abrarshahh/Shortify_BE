@@ -204,6 +204,7 @@ def test_validate_edl_rejects_render_duration_mismatch(tmp_path, monkeypatch):
 
 
 def test_generate_edl_caps_retries(monkeypatch, tmp_path):
+    monkeypatch.setenv("EDL_VALIDATION_FAIL", "stop")
     orchestrator = ShortifyOrchestrator.__new__(ShortifyOrchestrator)
 
     class FakeDirector:

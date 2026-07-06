@@ -8,8 +8,16 @@ from typing import List, Dict, Any, Optional
 logger = logging.getLogger("agents.rhythm")
 
 class RhythmEngineer:
-    def __init__(self):
-        pass
+    def __init__(self, cache_dir: str = "cache/shared/music_analysis"):
+        self.cache_dir = cache_dir
+        os.makedirs(self.cache_dir, exist_ok=True)
+
+    def _get_cache_path(self, file_path: str) -> str:
+        import hashlib
+        stats = os.stat(file_path)
+        fingerprint = f"{os.path.basename(file_path)}_{stats.st_size}_{stats.st_mtime}"
+        cache_key = hashlib.md5(fingerprint.encode()).hexdigest()
+        return os.path.join(self.cache_dir, f"{cache_key}.json")
 
     def analyze_music(self, file_path: str, clip_scores: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
@@ -17,6 +25,16 @@ class RhythmEngineer:
         """
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Audio file not found: {file_path}")
+
+        # Check Cache
+        cache_path = self._get_cache_path(file_path)
+        if os.path.exists(cache_path):
+            logger.info(f"RhythmEngineer: Found cached music analysis for: {file_path}")
+            try:
+                with open(cache_path, "r") as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"RhythmEngineer: Error reading cache: {e}")
 
         file_size = os.path.getsize(file_path)
         logger.info(f"RhythmEngineer: Starting music analysis. Input path: {file_path} (Size: {file_size} bytes)")
@@ -116,6 +134,15 @@ class RhythmEngineer:
             f"Tempo: {result['tempo']:.1f} BPM, Beats: {result['beat_count']}, "
             f"Energy segments: {len(result['energy_segments'])}, Mood: {result['sentiment']['label']}"
         )
+        
+        # Write to cache
+        try:
+            with open(cache_path, "w") as f:
+                json.dump(result, f, indent=2)
+            logger.info(f"RhythmEngineer: Music analysis cached successfully: {cache_path}")
+        except Exception as e:
+            logger.error(f"RhythmEngineer: Failed to cache music analysis: {e}")
+            
         return result
 
     def _group_timestamps(self, timestamps: List[float], threshold: float = 2.0) -> List[Dict[str, float]]:

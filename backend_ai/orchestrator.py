@@ -13,6 +13,7 @@ from backend_ai.services.editor_service import VideoEditor
 from backend_ai.agents.subtitle_agent import SubtitleAgent
 from backend_ai.services.color_service import ColorGradingAgent
 from backend_ai.agents.project_analyst_agent import ProjectAnalystAgent
+from backend_ai.services.relevance_service import RelevanceScorer
 from backend_ai.agents.thumbnail_agent import ThumbnailAgent
 from backend_ai.agents.clip_scoring_agent import ClipScoringAgent
 from backend_ai.services.edl_validation_service import validate_edl
@@ -35,6 +36,10 @@ class AgentState(TypedDict):
     target_duration: int
     aspect_ratio: str
     style: str
+    caption_style: Optional[str]
+    add_subtitle: bool
+    add_stickers: bool
+    add_textoverlay: bool
     
     # Internal data passed between nodes
     rhythm_data: Dict[str, Any]
@@ -54,6 +59,7 @@ class AgentState(TypedDict):
     skipped_clips: Optional[List[str]]
     clip_scores: Optional[Dict[str, Any]]
     dynamic_style: Optional[Dict[str, Any]]
+    has_cached_director: bool
 
 
 class ShortifyOrchestrator:
@@ -61,8 +67,10 @@ class ShortifyOrchestrator:
     Phase 7: Centralized LangGraph orchestrator that ties all agents together.
     """
 
-    def __init__(self, exports_dir: str = "data/exports"):
+    def __init__(self, exports_dir: str = "data/exports", project_id: Optional[str] = None, user: Optional[str] = None):
         self.exports_dir = exports_dir
+        self.project_id = project_id or "unknown_project"
+        self.user = user or "unknown_user"
         os.makedirs(exports_dir, exist_ok=True)
         
         # Instantiate the agents
@@ -74,6 +82,17 @@ class ShortifyOrchestrator:
         self.analyst_agent = ProjectAnalystAgent()
         self.thumbnail_agent = ThumbnailAgent()
         self.clip_scoring_agent = ClipScoringAgent()
+        self.relevance_scorer = RelevanceScorer()
+
+        # Override cache directories to use project cache path!
+        if project_id and user:
+            os.makedirs(self.cache_dir, exist_ok=True)
+            self.media_agent.cache_dir = os.path.join(self.cache_dir, "media_analysis")
+            self.clip_scoring_agent.cache_dir = os.path.join(self.cache_dir, "clip_scores")
+            self.rhythm_agent.cache_dir = os.path.join(self.cache_dir, "music_analysis")
+            os.makedirs(self.media_agent.cache_dir, exist_ok=True)
+            os.makedirs(self.clip_scoring_agent.cache_dir, exist_ok=True)
+            os.makedirs(self.rhythm_agent.cache_dir, exist_ok=True)
         
         # Subtitle config
         sub_config = AGENTS_CONFIG.get("subtitle_agent", {})
@@ -86,13 +105,139 @@ class ShortifyOrchestrator:
         # Build and compile the graph
         self.app = self._build_graph()
 
+    @property
+    def cache_dir(self) -> str:
+        return os.path.join("cache", self.user, self.project_id)
+
+    def _save_cache(self, state: AgentState) -> None:
+        if not self.project_id or not self.user or self.project_id == "unknown_project":
+            return
+            
+        import json
+        from datetime import datetime
+        cache_path = self.cache_dir
+        os.makedirs(cache_path, exist_ok=True)
+        
+        # 0. Define and create subdirectories
+        clip_scores_dir = os.path.join(cache_path, "clip_scores")
+        media_analysis_dir = os.path.join(cache_path, "media_analysis")
+        music_analysis_dir = os.path.join(cache_path, "music_analysis")
+        metadata_dir = os.path.join(cache_path, "metadata")
+        director_analysis_dir = os.path.join(cache_path, "director_analysis")
+        
+        os.makedirs(clip_scores_dir, exist_ok=True)
+        os.makedirs(media_analysis_dir, exist_ok=True)
+        os.makedirs(music_analysis_dir, exist_ok=True)
+        os.makedirs(metadata_dir, exist_ok=True)
+        os.makedirs(director_analysis_dir, exist_ok=True)
+        
+        # Make sure agent directories match in case they were modified
+        if hasattr(self, "media_agent") and self.media_agent.cache_dir:
+            os.makedirs(self.media_agent.cache_dir, exist_ok=True)
+        if hasattr(self, "clip_scoring_agent") and self.clip_scoring_agent.cache_dir:
+            os.makedirs(self.clip_scoring_agent.cache_dir, exist_ok=True)
+        if hasattr(self, "rhythm_agent") and self.rhythm_agent.cache_dir:
+            os.makedirs(self.rhythm_agent.cache_dir, exist_ok=True)
+        
+        # 1. Save clip_scores
+        clip_scores = state.get("clip_scores") or {}
+        with open(os.path.join(clip_scores_dir, "clip_scores.json"), "w") as f:
+            json.dump(clip_scores, f, indent=2)
+            
+        # 2. Save media_analysis
+        visual_data = state.get("visual_data") or []
+        with open(os.path.join(media_analysis_dir, "media_analysis.json"), "w") as f:
+            json.dump(visual_data, f, indent=2)
+            
+        # 3. Save music_analysis
+        rhythm_data = state.get("rhythm_data") or {}
+        with open(os.path.join(music_analysis_dir, "music_analysis.json"), "w") as f:
+            json.dump(rhythm_data, f, indent=2)
+            
+        # 4. Save director_analysis
+        edl = state.get("edl") or {}
+        with open(os.path.join(director_analysis_dir, "director_analysis.json"), "w") as f:
+            json.dump(edl, f, indent=2)
+            
+        # 5. Save metadata
+        metadata = {
+            "project_title": state.get("project_title"),
+            "target_duration": state.get("target_duration"),
+            "aspect_ratio": state.get("aspect_ratio"),
+            "style": state.get("style"),
+            "caption_style": state.get("caption_style"),
+            "add_subtitle": state.get("add_subtitle"),
+            "add_stickers": state.get("add_stickers"),
+            "add_textoverlay": state.get("add_textoverlay"),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        with open(os.path.join(metadata_dir, "metadata.json"), "w") as f:
+            json.dump(metadata, f, indent=2)
+            
+        logger.info(f"Orchestrator: Successfully saved project cache to {cache_path}")
+
+    def node_init_pipeline(self, state: AgentState) -> Dict:
+        logger.info("NODE: init_pipeline")
+        
+        cache_path = self.cache_dir
+        dir_analysis_path = os.path.join(cache_path, "director_analysis", "director_analysis.json")
+        
+        if os.path.exists(dir_analysis_path):
+            logger.info(f"Orchestrator: Found cached director_analysis.json at {dir_analysis_path}. Directly starting editing.")
+            import json
+            # Load cache files
+            try:
+                # Load director_analysis
+                with open(dir_analysis_path, "r") as f:
+                    edl = json.load(f)
+                    
+                # Load clip_scores
+                clip_scores = {}
+                clip_scores_path = os.path.join(cache_path, "clip_scores", "clip_scores.json")
+                if os.path.exists(clip_scores_path):
+                    with open(clip_scores_path, "r") as f:
+                        clip_scores = json.load(f)
+                        
+                # Load media_analysis
+                visual_data = []
+                media_analysis_path = os.path.join(cache_path, "media_analysis", "media_analysis.json")
+                if os.path.exists(media_analysis_path):
+                    with open(media_analysis_path, "r") as f:
+                        visual_data = json.load(f)
+                        
+                # Load music_analysis
+                rhythm_data = {}
+                music_analysis_path = os.path.join(cache_path, "music_analysis", "music_analysis.json")
+                if os.path.exists(music_analysis_path):
+                    with open(music_analysis_path, "r") as f:
+                        rhythm_data = json.load(f)
+                        
+                return {
+                    "edl": edl,
+                    "clip_scores": clip_scores,
+                    "visual_data": visual_data,
+                    "rhythm_data": rhythm_data,
+                    "has_cached_director": True
+                }
+            except Exception as e:
+                logger.error(f"Orchestrator: Failed to load project cache: {e}. Falling back to default pipeline procedure.")
+                
+        return {"has_cached_director": False}
+
+    def route_init_pipeline(self, state: AgentState) -> str:
+        if state.get("has_cached_director"):
+            return "direct_edit"
+        return "default_procedure"
+
     def _build_graph(self):
         workflow = StateGraph(AgentState)
 
         # Add nodes
+        workflow.add_node("init_pipeline", self.node_init_pipeline)
         workflow.add_node("analyze_rhythm", self.node_analyze_rhythm)
         workflow.add_node("pre_flight_check", self.node_pre_flight_check)
         workflow.add_node("analyze_media", self.node_analyze_media)
+        workflow.add_node("score_relevance", self.node_score_relevance)
         workflow.add_node("score_clips", self.node_score_clips)
         workflow.add_node("generate_edl", self.node_generate_edl)
         workflow.add_node("render_video", self.node_render_video)
@@ -101,11 +246,23 @@ class ShortifyOrchestrator:
         workflow.add_node("burn_subtitles", self.node_burn_subtitles)
 
         # Set edges
-        workflow.set_entry_point("pre_flight_check")
+        workflow.set_entry_point("init_pipeline")
+        
+        # Route from init_pipeline
+        workflow.add_conditional_edges(
+            "init_pipeline",
+            self.route_init_pipeline,
+            {
+                "direct_edit": "render_video",
+                "default_procedure": "pre_flight_check"
+            }
+        )
+
         workflow.add_edge("pre_flight_check", "score_clips")
         workflow.add_edge("score_clips", "analyze_rhythm")
         workflow.add_edge("analyze_rhythm", "analyze_media")
-        workflow.add_edge("analyze_media", "generate_edl")
+        workflow.add_edge("analyze_media", "score_relevance")
+        workflow.add_edge("score_relevance", "generate_edl")
         workflow.add_edge("generate_edl", "render_video")
         workflow.add_edge("render_video", "color_grade")
         workflow.add_edge("color_grade", "review_safety")
@@ -174,7 +331,12 @@ class ShortifyOrchestrator:
         for path in state["video_paths"]:
             if os.path.exists(path):
                 logger.info(f"Analyzing visual context for: {path}")
-                analysis = self.media_agent.analyze_video(path)
+                analysis = self.media_agent.analyze_video(path, user_prompt=state["project_title"])
+                
+                # Check for analysis errors to prevent silent failure
+                if "error" in analysis:
+                    raise ValueError(f"Media analysis failed for clip '{path}': {analysis['error']}")
+                    
                 visual_data.append(analysis)
                 # Small delay to avoid bursting the Gemini API rate limit
                 import time
@@ -182,6 +344,18 @@ class ShortifyOrchestrator:
             else:
                 logger.warning(f"Video not found at {path}")
                 
+        return {"visual_data": visual_data}
+
+    def node_score_relevance(self, state: AgentState) -> Dict:
+        logger.info("NODE: score_relevance")
+        callback = state.get("progress_callback")
+        if callback:
+            callback(62, "Scoring segment relevance to topic brief...")
+            
+        visual_data = self.relevance_scorer.score_segments(
+            user_prompt=state["project_title"],
+            media_analyses=state["visual_data"]
+        )
         return {"visual_data": visual_data}
 
     def node_score_clips(self, state: AgentState) -> Dict:
@@ -247,8 +421,13 @@ class ShortifyOrchestrator:
                 # Re-validate corrected EDL to ensure continuity & matching durations
                 validated_corrected_edl = validate_edl(corrected_edl, clips_dir, target_duration=float(state["target_duration"]))
                 
+                final_edl = validated_corrected_edl.model_dump(mode="json")
+                temp_state = dict(state)
+                temp_state["edl"] = final_edl
+                self._save_cache(temp_state)
+
                 return {
-                    "edl": validated_corrected_edl.model_dump(mode="json"),
+                    "edl": final_edl,
                     "edl_feedback": "",
                     "max_edl_retries": max_edl_retries,
                 }
@@ -260,6 +439,26 @@ class ShortifyOrchestrator:
 
                 logger.warning(f"EDL validation failed (attempt {max_edl_retries}/3): {feedback}")
                 if max_edl_retries >= 3:
+                    if os.getenv("EDL_VALIDATION_FAIL", "stop").strip().lower() == "pass":
+                        logger.warning("EDL_VALIDATION_FAIL is set to 'pass'. Bypassing validation failure and using the generated EDL.")
+                        best_edl = edl
+                        try:
+                            if "corrected_edl" in locals() and locals()["corrected_edl"]:
+                                best_edl = locals()["corrected_edl"]
+                            elif "edl_dict" in locals() and locals()["edl_dict"]:
+                                best_edl = locals()["edl_dict"]
+                        except Exception:
+                            pass
+                        
+                        temp_state = dict(state)
+                        temp_state["edl"] = best_edl
+                        self._save_cache(temp_state)
+
+                        return {
+                            "edl": best_edl,
+                            "edl_feedback": "",
+                            "max_edl_retries": max_edl_retries,
+                        }
                     raise EDLGenerationError(
                         retry_count=max_edl_retries,
                         last_error=feedback,
@@ -284,24 +483,40 @@ class ShortifyOrchestrator:
         
         output_filename = f"render_{state['output_filename']}"
         
-        # Dynamically generate typography style
-        storyline = state.get("edl", {}).get("storyline", "")
-        video_style = state.get("style", "cinematic")
-        
-        dynamic_style = self.subtitle_agent.generate_aesthetic_style(
-            prompt=state["project_title"],
-            storyline=storyline,
-            video_style=video_style
-        )
+        # Determine caption style mapping / dynamic style
+        caption_style = state.get("caption_style")
+        if caption_style and caption_style not in ("none", ""):
+            styles_from_config = AGENTS_CONFIG.get("caption_styles", {})
+            style_cfg = styles_from_config.get(caption_style, {})
+            dynamic_style = style_cfg
+        else:
+            if state.get("add_textoverlay", True) or state.get("add_subtitle", True):
+                storyline = state.get("edl", {}).get("storyline", "")
+                video_style = state.get("style", "cinematic")
+                dynamic_style = self.subtitle_agent.generate_aesthetic_style(
+                    prompt=state["project_title"],
+                    storyline=storyline,
+                    video_style=video_style
+                )
+            else:
+                dynamic_style = None
         
         # Download dynamic stickers and visual effects overlays
         edl = state.get("edl", {})
         timeline = edl.get("timeline", [])
+        
+        add_textoverlay = state.get("add_textoverlay", True)
+        if not add_textoverlay:
+            for item in timeline:
+                item["text_overlay"] = ""
+                
+        add_stickers = state.get("add_stickers", True)
+        pixabay_apply = os.getenv("PIXABAY_APPLY", "true").strip().lower() == "true"
         from backend_ai.utils.effect_downloader import download_giphy_sticker, download_pixabay_effect
         
         for item in timeline:
             details = item.get("details", {})
-            sticker_query = details.get("sticker_query", "")
+            sticker_query = details.get("sticker_query", "") if add_stickers else ""
             effect_query = details.get("effect_query", "")
             effect_type = details.get("effect_type", "none")
             
@@ -315,16 +530,21 @@ class ShortifyOrchestrator:
             if sticker_path:
                 item["sticker_path"] = sticker_path
                 item["sticker_position"] = details.get("sticker_position", "bottom-center")
+            else:
+                item.pop("sticker_path", None)
+                item.pop("sticker_position", None)
                 
             # Download Pixabay overlay loop if query is set
             effect_path = None
-            if effect_type != "none" and effect_query:
+            if pixabay_apply and effect_type != "none" and effect_query:
                 try:
                     effect_path = download_pixabay_effect(effect_query)
                 except Exception as e:
                     logger.warning(f"Failed to download effect for query '{effect_query}': {e}")
             if effect_path:
                 item["effect_path"] = effect_path
+            else:
+                item.pop("effect_path", None)
 
         logger.info(f"Rendering EDL to {output_filename}...")
         rendered_path = editor.render(
@@ -409,7 +629,10 @@ class ShortifyOrchestrator:
             
         dynamic_style = state.get("dynamic_style")
         requires_subtitles = False
-        if dynamic_style and "requires_subtitles" in dynamic_style:
+        if "add_subtitle" in state:
+            requires_subtitles = bool(state["add_subtitle"])
+            logger.info(f"Explicitly requested add_subtitle = {requires_subtitles}")
+        elif dynamic_style and "requires_subtitles" in dynamic_style:
             requires_subtitles = bool(dynamic_style["requires_subtitles"])
             logger.info(f"Agent dynamically decided requires_subtitles = {requires_subtitles}")
         else:
@@ -443,14 +666,15 @@ class ShortifyOrchestrator:
                 "final_video_path": final_output
             }
 
-        logger.info(f"Transcribing audio for {video_path}...")
-        transcription = self.subtitle_agent.transcribe(video_path)
+        caption_style = state.get("caption_style") or getattr(self.subtitle_agent, "caption_style", "hormozi")
+        logger.info(f"Transcribing audio for {video_path} with style {caption_style}...")
+        transcription = self.subtitle_agent.transcribe(video_path, style_name=caption_style)
         
         dynamic_style = state.get("dynamic_style")
         
         if transcription["captions"]:
             logger.info(f"Burning subtitles to {final_output}...")
-            style_param = dynamic_style if dynamic_style else getattr(self.subtitle_agent, "caption_style", "hormozi")
+            style_param = dynamic_style if dynamic_style else caption_style
             final_video_path = self.subtitle_agent.burn_subtitles(
                 video_path=video_path,
                 captions=transcription["captions"],

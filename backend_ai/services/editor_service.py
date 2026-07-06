@@ -228,7 +228,8 @@ class VideoEditor:
                 ],
                 capture_output=True,
                 text=True,
-                check=True
+                check=True,
+                stdin=subprocess.DEVNULL
             )
             return "audio" in result.stdout.lower()
         except Exception:
@@ -278,7 +279,17 @@ class VideoEditor:
         dynamic_style: Optional[Dict[str, Any]] = None,
         sticker_path: Optional[str] = None,
         sticker_position: Optional[str] = "bottom-center",
-        effect_path: Optional[str] = None
+        effect_path: Optional[str] = None,
+        color_grade: Optional[Dict[str, Any]] = None,
+        speed_preset: Optional[str] = None,
+        speed_keyframes: Optional[List[Tuple[float, float]]] = None,
+        reverse: bool = False,
+        stabilize: bool = False,
+        stabilize_strength: float = 0.5,
+        text_preset: Optional[str] = None,
+        text_animation: Optional[str] = None,
+        sticker_animation: Optional[str] = None,
+        original_audio_volume: Optional[float] = None
     ) -> float:
         """
         Processes a single timeline item (trim, scale, crop, face-anchored, normalize, zoom, text-overlay)
@@ -286,8 +297,65 @@ class VideoEditor:
         """
         target_w, target_h = self.target_w, self.target_h
         temp_kb = None
+        temp_stabilized = None
 
         try:
+            pixabay_apply = os.getenv("PIXABAY_APPLY", "true").strip().lower() == "true"
+            if not pixabay_apply:
+                effect_path = None
+
+            # Move stabilization here to process before slicing
+            stabilize_trf_path = None
+            if stabilize and not is_image:
+                dur = end_in - start_in
+                if dur >= 0.5:
+                    from backend_ai.effects.stabilization import stabilize_clip
+                    try:
+                        stabilize_trf_path = stabilize_clip(
+                            clip_path=clip_path,
+                            start=start_in,
+                            end=end_in,
+                            temp_dir=os.path.dirname(temp_path),
+                            strength=stabilize_strength
+                        )
+                        temp_stabilized = temp_path.replace(".mp4", "_stabilized_temp.mp4")
+                        trf_path_escaped = stabilize_trf_path.replace("\\", "/").replace(":", "\\:")
+                        
+                        cmd = [
+                            "ffmpeg", "-y", "-nostdin",
+                            "-ss", f"{start_in:.3f}",
+                            "-to", f"{end_in:.3f}",
+                            "-i", clip_path,
+                            "-vf", f"fps=fps=30,vidstabtransform=input={trf_path_escaped}:smoothing=15:optzoom=1",
+                            "-map", "0:v",
+                            "-map", "0:a?",
+                            "-c:v", "libx264",
+                            "-pix_fmt", "yuv420p",
+                            "-c:a", "aac",
+                            "-ar", "44100",
+                            "-ac", "2",
+                            temp_stabilized
+                        ]
+                        logger.info(f"Running stabilization render pass: {' '.join(cmd)}")
+                        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL, timeout=180)
+                        if result.returncode != 0:
+                            logger.error(f"Stabilization render pass failed: {result.stderr}")
+                            raise RuntimeError(f"FFmpeg stabilization render failed: {result.stderr}")
+                        
+                        clip_path = temp_stabilized
+                        start_in = 0.0
+                        end_in = dur
+                        stabilize_trf_path = None
+                    except Exception as e:
+                        logger.warning(f"Stabilization failed: {e}. Proceeding without stabilization.")
+                        stabilize_trf_path = None
+                        if temp_stabilized and os.path.exists(temp_stabilized):
+                            try:
+                                os.remove(temp_stabilized)
+                            except Exception:
+                                pass
+                            temp_stabilized = None
+
             if is_image:
                 duration = target_duration if target_duration > 0 else 3.0
                 kb_direction = "in"
@@ -316,23 +384,15 @@ class VideoEditor:
             
             has_audio = (not is_image) and self._check_has_audio(clip_path) and keep_original_audio
             
-            # Silence detection
-            intervals = []
-            if has_audio:
-                non_silent_intervals, _ = self._detect_non_silent_intervals(clip_path)
-                if non_silent_intervals:
-                    for ns_start, ns_end in non_silent_intervals:
-                        s = max(start_in, ns_start)
-                        e = min(end_in, ns_end)
-                        if e > s + 0.1:
-                            intervals.append((s, e))
-                            
-            if not intervals:
-                intervals = [(start_in, min(end_in, orig_duration))]
+            # Silence detection (bypassed to avoid dropping planned video frames)
+            intervals = [(start_in, min(end_in, orig_duration))]
 
             # Normalization and ducking volume factors
             norm_gain = self._get_audio_normalization_gain(clip_path) if has_audio else 1.0
-            duck_gain = self.ORIGINAL_AUDIO_VOLUME if music_active else 1.0
+            if original_audio_volume is not None:
+                duck_gain = original_audio_volume
+            else:
+                duck_gain = self.ORIGINAL_AUDIO_VOLUME if music_active else 1.0
             final_audio_gain = norm_gain * duck_gain
 
             # Horizontal crop centering using face_anchor_x (with Haar cascade fallback)
@@ -360,7 +420,7 @@ class VideoEditor:
             effect_input_idx = -1
             if effect_path and os.path.exists(effect_path):
                 effect_input_idx = len(ffmpeg_inputs)
-                ffmpeg_inputs.append(("-i", effect_path))
+                ffmpeg_inputs.append(("-stream_loop -1 -i", effect_path))
                 
             sticker_input_idx = -1
             if sticker_path and os.path.exists(sticker_path):
@@ -368,28 +428,86 @@ class VideoEditor:
                 if sticker_path.lower().endswith(".gif"):
                     ffmpeg_inputs.append(("-ignore_loop 0 -i", sticker_path))
                 else:
-                    ffmpeg_inputs.append(("-i", sticker_path))
+                    ffmpeg_inputs.append(("-stream_loop -1 -i", sticker_path))
+
+
 
             # Build FFmpeg filters
             filter_complex_parts = []
             video_output_names = []
             audio_output_names = []
             
-            speed = self.PACING_SPEED.get(pacing, 1.0)
-            if speed <= 0:
-                speed = 1.0
+            use_custom_speed = bool(speed_preset or speed_keyframes or reverse)
+            if speed_keyframes:
+                from backend_ai.effects.motion import get_average_speed_linear
+                avg_speed = get_average_speed_linear(speed_keyframes)
+            elif speed_preset:
+                from backend_ai.effects.motion import SPEED_PRESETS, get_average_speed_linear
+                preset_keys = SPEED_PRESETS.get(speed_preset)
+                avg_speed = get_average_speed_linear(preset_keys) if preset_keys else 1.0
+            else:
+                avg_speed = self.PACING_SPEED.get(pacing, 1.0)
+                
+            if avg_speed <= 0:
+                avg_speed = 1.0
+
+            # If not custom speed but avg_speed is not 1.0, unify it as keyframes
+            if not use_custom_speed and avg_speed != 1.0:
+                speed_keyframes = [(0.0, avg_speed), (1.0, avg_speed)]
+                use_custom_speed = True
+
+            speed = avg_speed
+
+            # Pre-calculate output duration so it can be referenced in transparent canvas / overlay animations
+            total_intervals_duration = sum(e - s for s, e in intervals) / speed
+            output_duration = target_duration if (target_duration > 0 and target_duration < total_intervals_duration) else total_intervals_duration
+
+            color_filter_str = ""
+            if color_grade:
+                from backend_ai.effects.color import ColorGradeParams, build_ffmpeg_color_filter
+                if isinstance(color_grade, dict):
+                    params = ColorGradeParams(**color_grade)
+                else:
+                    params = color_grade
+                color_filter_str = build_ffmpeg_color_filter(params)
                 
             for idx, (s, e) in enumerate(intervals):
                 v_name = f"v{idx}"
                 a_name = f"a{idx}"
                 
-                if speed != 1.0:
-                    filter_complex_parts.append(
-                        f"[0:v]trim=start={s}:end={e},setpts=(PTS-STARTPTS)/{speed:.2f},scale={new_w}:{new_h},crop={target_w}:{target_h}:{x1}:{y1}[{v_name}]"
+                v_filters = []
+                v_filters.append(f"trim=start={s}:end={e}")
+                v_filters.append("setpts=PTS-STARTPTS")
+                v_filters.append("fps=fps=30")
+                
+                if use_custom_speed:
+                    from backend_ai.effects.motion import build_ffmpeg_speed_filter
+                    v_speed, a_speed = build_ffmpeg_speed_filter(
+                        duration=e - s,
+                        keyframes=speed_keyframes,
+                        preset=speed_preset,
+                        reverse=reverse
                     )
+                    v_filters.append(v_speed)
+                    
+                v_filters.append(f"scale={new_w}:{new_h}")
+                v_filters.append(f"crop={target_w}:{target_h}:{x1}:{y1}")
+                
+                if stabilize_trf_path:
+                    trf_path_escaped = stabilize_trf_path.replace("\\", "/").replace(":", "\\:")
+                    v_filters.append(f"vidstabtransform=input={trf_path_escaped}:smoothing=15:optzoom=1")
+                    
+                if color_filter_str:
+                    v_filters.append(color_filter_str)
+
+                filter_complex_parts.append(
+                    f"[0:v]{','.join(v_filters)}[{v_name}]"
+                )
+                
+                if use_custom_speed and a_speed != "copy":
                     if has_audio:
                         filter_complex_parts.append(
-                            f"[0:a]atrim=start={s}:end={e},asetpts=PTS-STARTPTS,atempo={speed:.2f}[{a_name}]"
+                            f"[0:a]atrim=start={s}:end={e},asetpts=PTS-STARTPTS,{a_speed}[{a_name}]"
                         )
                     else:
                         dur = (e - s) / speed
@@ -397,9 +515,6 @@ class VideoEditor:
                             f"aevalsrc=0:d={dur:.3f},asetpts=PTS-STARTPTS[{a_name}]"
                         )
                 else:
-                    filter_complex_parts.append(
-                        f"[0:v]trim=start={s}:end={e},setpts=PTS-STARTPTS,scale={new_w}:{new_h},crop={target_w}:{target_h}:{x1}:{y1}[{v_name}]"
-                    )
                     if has_audio:
                         filter_complex_parts.append(
                             f"[0:a]atrim=start={s}:end={e},asetpts=PTS-STARTPTS[{a_name}]"
@@ -428,12 +543,12 @@ class VideoEditor:
             # Apply transitions (zoom_in / zoom_out)
             if transition == "zoom_in":
                 filter_complex_parts.append(
-                    f"{video_proc_in}zoompan=z='1+0.04*on/30':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={target_w}x{target_h}[v_zoom]"
+                    f"{video_proc_in}zoompan=z='1+0.04*on/30':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={target_w}x{target_h}:fps=30[v_zoom]"
                 )
                 video_proc_in = "[v_zoom]"
             elif transition == "zoom_out":
                 filter_complex_parts.append(
-                    f"{video_proc_in}zoompan=z='1.1-0.04*on/30':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={target_w}x{target_h}[v_zoom]"
+                    f"{video_proc_in}zoompan=z='1.1-0.04*on/30':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={target_w}x{target_h}:fps=30[v_zoom]"
                 )
                 video_proc_in = "[v_zoom]"
                 
@@ -449,11 +564,27 @@ class VideoEditor:
                 font_color = style_cfg.get("font_color", "white")
                 font_size = style_cfg.get("font_size", 70)
                 font_weight = style_cfg.get("font_weight", 700)
+                outline_color = style_cfg.get("outline_color", "black")
+                outline_width = style_cfg.get("outline_width", 2)
+                
+                # Check for style presets
+                if text_preset:
+                    from backend_ai.effects.text_presets import TEXT_PRESETS
+                    preset_cfg = TEXT_PRESETS.get(text_preset, {})
+                    font_name = preset_cfg.get("font_name", font_name)
+                    font_color = preset_cfg.get("font_color", font_color)
+                    font_size = preset_cfg.get("font_size", font_size)
+                    outline_color = preset_cfg.get("outline_color", outline_color)
+                    outline_width = preset_cfg.get("outline_width", outline_width)
+                    if not text_animation:
+                        text_animation = preset_cfg.get("default_animation", "none")
+                
+                if not text_animation:
+                    text_animation = "none"
+
                 if not dynamic_style and font_size < 50:
                     font_size = 70
                     
-                outline_color = style_cfg.get("outline_color", "black")
-                outline_width = style_cfg.get("outline_width", 2)
                 if outline_color == "none":
                     outline_width = 0
 
@@ -461,13 +592,17 @@ class VideoEditor:
                 escaped_text = self._escape_drawtext(text_overlay)
                 font_path_escaped = font_path.replace("\\", "/").replace(":", "\\:")
                 
+                # Render text on a transparent 1080x1920 (target size) canvas first
+                x_resting = "(w-text_w)/2"
+                y_resting = "h*0.15"
+                
                 drawtext_parts = [
                     f"drawtext=fontfile='{font_path_escaped}'",
                     f"text='{escaped_text}'",
                     f"fontsize={font_size}",
                     f"fontcolor={font_color}",
-                    "x=(w-text_w)/2",
-                    "y=h*0.15"
+                    f"x={x_resting}",
+                    f"y={y_resting}"
                 ]
                 
                 # Handle shadow option dynamically
@@ -483,15 +618,41 @@ class VideoEditor:
                     drawtext_parts.append(f"borderw={outline_width}")
                     drawtext_parts.append(f"bordercolor={outline_color}")
                     
+                text_layer_name = "text_layer"
+                text_anim_layer_name = "text_anim_layer"
+                
+                # 1. Create transparent canvas + text drawing
                 filter_complex_parts.append(
-                    f"{video_proc_in}{':'.join(drawtext_parts)}[v_text]"
+                    f"color=c=black@0:s={target_w}x{target_h}:d={output_duration},{':'.join(drawtext_parts)}[{text_layer_name}]"
                 )
-                video_proc_in = "[v_text]"
+                
+                # 2. Build text entrance/exit animations
+                from backend_ai.effects.text_animation import build_ffmpeg_overlay_filters
+                v_fade_filter, x_expr, y_expr = build_ffmpeg_overlay_filters(
+                    duration=output_duration,
+                    anim_type=text_animation,
+                    x_resting="0",   # Placed correctly on transparent canvas, so relative resting offset is 0
+                    y_resting="0"
+                )
+                
+                if v_fade_filter != "copy":
+                    filter_complex_parts.append(
+                        f"[{text_layer_name}]{v_fade_filter}[{text_anim_layer_name}]"
+                    )
+                    text_layer_source = f"[{text_anim_layer_name}]"
+                else:
+                    text_layer_source = f"[{text_layer_name}]"
+                    
+                # 3. Composite the animated text layer onto the video
+                filter_complex_parts.append(
+                    f"{video_proc_in}{text_layer_source}overlay=x='{x_expr}':y='{y_expr}':shortest=1[v_text_applied]"
+                )
+                video_proc_in = "[v_text_applied]"
                 
             # Apply visual effect loop overlay if present
             if effect_input_idx > 0:
                 filter_complex_parts.append(
-                    f"[{effect_input_idx}:v]scale={target_w}:{target_h},loop=loop=-1:size=32767:start=0[v_effect_scaled]"
+                    f"[{effect_input_idx}:v]scale={target_w}:{target_h},fps=fps=30[v_effect_scaled]"
                 )
                 filter_complex_parts.append(
                     f"{video_proc_in}[v_effect_scaled]blend=all_mode=screen:all_opacity=0.7[v_effect_applied]"
@@ -502,7 +663,7 @@ class VideoEditor:
             if sticker_input_idx > 0:
                 sticker_w = int(target_w * 0.30)
                 filter_complex_parts.append(
-                    f"[{sticker_input_idx}:v]scale={sticker_w}:-1[v_sticker_scaled]"
+                    f"[{sticker_input_idx}:v]scale={sticker_w}:-1,fps=fps=30[v_sticker_scaled]"
                 )
                 pos_map = {
                     "center": ("(W-w)/2", "(H-h)/2"),
@@ -512,9 +673,31 @@ class VideoEditor:
                     "bottom-right": ("W-w-50", "H-h-320"),
                     "bottom-center": ("(W-w)/2", "H-h-320"),
                 }
-                x_expr, y_expr = pos_map.get(sticker_position, pos_map["bottom-center"])
+                
+                sticker_layer = "[v_sticker_scaled]"
+                if sticker_animation and sticker_animation != "none":
+                    from backend_ai.effects.text_animation import build_ffmpeg_overlay_filters
+                    x_resting, y_resting = pos_map.get(sticker_position, pos_map["bottom-center"])
+                    
+                    v_fade_filter, x_expr, y_expr = build_ffmpeg_overlay_filters(
+                        duration=output_duration,
+                        anim_type=sticker_animation,
+                        x_resting=x_resting,
+                        y_resting=y_resting
+                    )
+                    
+                    if v_fade_filter != "copy":
+                        filter_complex_parts.append(
+                            f"[v_sticker_scaled]{v_fade_filter}[v_sticker_animated]"
+                        )
+                        sticker_layer = "[v_sticker_animated]"
+                else:
+                    x_resting, y_resting = pos_map.get(sticker_position, pos_map["bottom-center"])
+                    x_expr = x_resting
+                    y_expr = y_resting
+                    
                 filter_complex_parts.append(
-                    f"{video_proc_in}[v_sticker_scaled]overlay=x='{x_expr}':y='{y_expr}'[v_sticker_applied]"
+                    f"{video_proc_in}{sticker_layer}overlay=x='{x_expr}':y='{y_expr}':shortest=1[v_sticker_applied]"
                 )
                 video_proc_in = "[v_sticker_applied]"
 
@@ -524,15 +707,13 @@ class VideoEditor:
             
             filter_complex_str = ";".join(filter_complex_parts)
             
-            total_intervals_duration = sum(e - s for s, e in intervals) / speed
-            output_duration = target_duration if (target_duration > 0 and target_duration < total_intervals_duration) else total_intervals_duration
-            
-            cmd = ["ffmpeg", "-y"]
+            cmd = ["ffmpeg", "-y", "-nostdin"]
             for arg_prefix, path in ffmpeg_inputs:
-                if "ignore_loop" in arg_prefix:
-                    cmd.extend(["-ignore_loop", "0", "-i", path])
-                else:
+                if arg_prefix == "-i":
                     cmd.extend(["-i", path])
+                else:
+                    cmd.extend(arg_prefix.split())
+                    cmd.append(path)
                     
             cmd.extend([
                 "-filter_complex", filter_complex_str,
@@ -541,12 +722,19 @@ class VideoEditor:
                 "-c:v", "libx264",
                 "-pix_fmt", "yuv420p",
                 "-c:a", "aac",
+                "-ar", "44100",
+                "-ac", "2",
                 "-t", f"{output_duration:.3f}",
                 temp_path
             ])
             
             logger.info(f"Running FFmpeg clip process command: {' '.join(cmd)}")
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL, timeout=300)
+            except subprocess.TimeoutExpired as e:
+                logger.error(f"FFmpeg clip process timed out after 300 seconds for {clip_path}")
+                raise RuntimeError(f"FFmpeg clip process timed out: {e}")
+
             if result.returncode != 0:
                 logger.error(f"FFmpeg clip process failed for {clip_path}")
                 logger.error(f"FFmpeg stderr: {result.stderr}")
@@ -560,6 +748,11 @@ class VideoEditor:
                     os.remove(temp_kb)
                 except Exception as e:
                     logger.warning(f"Failed to remove temp_kb {temp_kb}: {e}")
+            if temp_stabilized and os.path.exists(temp_stabilized):
+                try:
+                    os.remove(temp_stabilized)
+                except Exception as e:
+                    logger.warning(f"Failed to remove temp_stabilized {temp_stabilized}: {e}")
 
     def _build_ffmpeg_concat(
         self,
@@ -572,6 +765,7 @@ class VideoEditor:
         music_start_offset: float = 0.0,
         tempo: float = 0.0,
         style: str = "cinematic",
+        music_volumes: Optional[list[Optional[float]]] = None,
     ) -> None:
         """Assemble processed clips with FFmpeg's streaming filter graph."""
         if not clip_paths:
@@ -619,8 +813,8 @@ class VideoEditor:
                 current_input = ffmpeg.input(current_path)
                 next_input = ffmpeg.input(next_path)
                 target_fps = 30
-                cur_video_norm = current_input.video.filter('fps', fps=target_fps).filter('settb', 'AVTB')
-                next_video_norm = next_input.video.filter('fps', fps=target_fps).filter('settb', 'AVTB')
+                cur_video_norm = current_input.video.filter('fps', fps=target_fps)
+                next_video_norm = next_input.video.filter('fps', fps=target_fps)
 
                 if transition in transition_map:
                     fade_dur = min(sync_fade_duration, current_duration / 2, next_duration / 2)
@@ -635,8 +829,10 @@ class VideoEditor:
                         )
 
                         if current_input.audio is not None and next_input.audio is not None:
+                            cur_audio_norm = current_input.audio.filter('aformat', sample_rates=44100, channel_layouts='stereo')
+                            next_audio_norm = next_input.audio.filter('aformat', sample_rates=44100, channel_layouts='stereo')
                             audio_stream = ffmpeg.filter(
-                                [current_input.audio, next_input.audio],
+                                [cur_audio_norm, next_audio_norm],
                                 "acrossfade",
                                 d=fade_dur,
                             )
@@ -648,6 +844,9 @@ class VideoEditor:
                                 acodec="aac",
                                 pix_fmt="yuv420p",
                                 movflags="+faststart",
+                                nostdin=None,
+                                ar="44100",
+                                ac="2"
                             )
                         else:
                             stream = ffmpeg.output(
@@ -656,6 +855,7 @@ class VideoEditor:
                                 vcodec="libx264",
                                 pix_fmt="yuv420p",
                                 movflags="+faststart",
+                                nostdin=None,
                             )
 
                         try:
@@ -669,22 +869,19 @@ class VideoEditor:
                         continue
 
                 if current_input.audio is not None and next_input.audio is not None:
+                    cur_audio_norm = current_input.audio.filter('aformat', sample_rates=44100, channel_layouts='stereo')
+                    next_audio_norm = next_input.audio.filter('aformat', sample_rates=44100, channel_layouts='stereo')
                     concat_node = ffmpeg.concat(
-                        current_input.video,
-                        next_input.video,
+                        cur_video_norm,
+                        cur_audio_norm,
+                        next_video_norm,
+                        next_audio_norm,
                         n=2,
                         v=1,
-                        a=0,
-                    )
-                    video_stream = concat_node.node.stream("v")
-                    audio_node = ffmpeg.concat(
-                        current_input.audio,
-                        next_input.audio,
-                        n=2,
-                        v=0,
                         a=1,
                     )
-                    audio_stream = audio_node.node.stream("a")
+                    video_stream = concat_node.node.stream("v")
+                    audio_stream = concat_node.node.stream("a")
                     stream = ffmpeg.output(
                         video_stream,
                         audio_stream,
@@ -693,11 +890,14 @@ class VideoEditor:
                         acodec="aac",
                         pix_fmt="yuv420p",
                         movflags="+faststart",
+                        nostdin=None,
+                        ar="44100",
+                        ac="2"
                     )
                 else:
                     concat_node = ffmpeg.concat(
-                        current_input.video,
-                        next_input.video,
+                        cur_video_norm,
+                        next_video_norm,
                         n=2,
                         v=1,
                         a=0,
@@ -708,6 +908,7 @@ class VideoEditor:
                         vcodec="libx264",
                         pix_fmt="yuv420p",
                         movflags="+faststart",
+                        nostdin=None,
                     )
 
                 try:
@@ -723,6 +924,9 @@ class VideoEditor:
                 "vcodec": "libx264",
                 "pix_fmt": "yuv420p",
                 "movflags": "+faststart",
+                "nostdin": None,
+                "ar": "44100",
+                "ac": "2"
             }
 
             # Calculate dynamic audio ducking intervals (Task 34)
@@ -731,6 +935,7 @@ class VideoEditor:
             for idx in range(len(clip_paths)):
                 dur = clip_durations[idx]
                 has_aud = clip_has_audio[idx]
+                mus_vol = music_volumes[idx] if (music_volumes and idx < len(music_volumes)) else None
                 
                 # Check transition overlap for correct timing
                 transition_term = (transitions[idx] or "none").lower()
@@ -742,9 +947,14 @@ class VideoEditor:
                 if idx > 0:
                     accumulated -= fade_overlap
                     
-                if has_aud:
-                    active_intervals.append((accumulated, accumulated + dur))
-                    
+                # Determine music volume for this segment
+                if mus_vol is None:
+                    if has_aud:
+                        mus_vol = self.MUSIC_DUCKED_VOLUME
+                    else:
+                        mus_vol = self.MUSIC_VOLUME
+                
+                active_intervals.append((accumulated, accumulated + dur, mus_vol))
                 accumulated += dur
 
             final_input = ffmpeg.input(current_path)
@@ -758,11 +968,10 @@ class VideoEditor:
 
                 # Apply dynamic audio ducking (Task 34)
                 if active_intervals:
-                    duck_conditions = []
-                    for start, end in active_intervals:
-                        duck_conditions.append(f"between(t,{start:.3f},{end:.3f})")
-                    cond_str = "+".join(duck_conditions)
-                    volume_expr = f"if({cond_str}, {self.MUSIC_DUCKED_VOLUME}, {self.MUSIC_VOLUME})"
+                    # Build time-varying volume envelope expression
+                    volume_expr = f"{self.MUSIC_VOLUME}"
+                    for start, end, vol in reversed(active_intervals):
+                        volume_expr = f"if(between(t,{start:.3f},{end:.3f}),{vol:.3f},{volume_expr})"
                     logger.info(f"Dynamic Audio Ducking active intervals count: {len(active_intervals)}")
                     logger.debug(f"Volume filter expression: {volume_expr}")
                 else:
@@ -775,19 +984,23 @@ class VideoEditor:
                 music_audio = music_audio.filter("afade", t="out", st=fade_out_start, d=1.5)
 
                 if final_input.audio is not None:
+                    cur_audio_norm = final_input.audio.filter('aformat', sample_rates=44100, channel_layouts='stereo')
+                    music_audio_norm = music_audio.filter('aformat', sample_rates=44100, channel_layouts='stereo')
                     mixed_audio = ffmpeg.filter(
-                        [final_input.audio, music_audio],
+                        [cur_audio_norm, music_audio_norm],
                         "amix",
                         inputs=2,
                         duration="first",
                         dropout_transition=0,
+                        normalize=0,
                     )
                 else:
-                    mixed_audio = music_audio
+                    mixed_audio = music_audio.filter('aformat', sample_rates=44100, channel_layouts='stereo')
 
                 stream = ffmpeg.output(final_input.video, mixed_audio, output_path, acodec="aac", **output_args)
             elif final_input.audio is not None:
-                stream = ffmpeg.output(final_input.video, final_input.audio, output_path, acodec="aac", **output_args)
+                cur_audio_norm = final_input.audio.filter('aformat', sample_rates=44100, channel_layouts='stereo')
+                stream = ffmpeg.output(final_input.video, cur_audio_norm, output_path, acodec="aac", **output_args)
             else:
                 stream = ffmpeg.output(final_input.video, output_path, **output_args)
 
@@ -797,7 +1010,8 @@ class VideoEditor:
                 stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr)
                 raise RuntimeError(f"FFmpeg assembly failed: {stderr[-2000:]}") from exc
         finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            # shutil.rmtree(temp_dir, ignore_errors=True)
+            pass
 
     def _enforce_final_duration(self, file_path: str, target_duration: float) -> None:
         if target_duration <= 0:
@@ -818,13 +1032,13 @@ class VideoEditor:
         if actual_duration > target_duration:
             logger.info(f"Trimming final video: {actual_duration:.2f}s -> target {target_duration:.2f}s")
             cmd = [
-                "ffmpeg", "-y",
+                "ffmpeg", "-y", "-nostdin",
                 "-i", file_path,
                 "-t", f"{target_duration:.3f}",
                 "-c", "copy",
                 temp_output
             ]
-            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
             os.replace(temp_output, file_path)
         else:
             pad_duration = target_duration - actual_duration
@@ -832,13 +1046,13 @@ class VideoEditor:
             
             black_temp = tempfile.mktemp(suffix=".mp4", dir=os.path.dirname(file_path))
             cmd_black = [
-                "ffmpeg", "-y",
+                "ffmpeg", "-y", "-nostdin",
                 "-f", "lavfi", "-i", f"color=c=black:s={self.target_w}x{self.target_h}:r=30:d={pad_duration:.3f}",
                 "-f", "lavfi", "-i", f"anullsrc=channel_layout=stereo:sample_rate=44100:d={pad_duration:.3f}",
                 "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
                 black_temp
             ]
-            subprocess.run(cmd_black, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(cmd_black, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
             
             concat_list = tempfile.mktemp(suffix=".txt", dir=os.path.dirname(file_path))
             with open(concat_list, "w") as f:
@@ -848,14 +1062,14 @@ class VideoEditor:
                 f.write(f"file '{p2}'\n")
                 
             cmd_concat = [
-                "ffmpeg", "-y",
+                "ffmpeg", "-y", "-nostdin",
                 "-f", "concat",
                 "-safe", "0",
                 "-i", concat_list,
                 "-c", "copy",
                 temp_output
             ]
-            subprocess.run(cmd_concat, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(cmd_concat, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
             
             os.remove(concat_list)
             os.remove(black_temp)
@@ -875,7 +1089,7 @@ class VideoEditor:
             try:
                 shutil.rmtree(temp_dir, ignore_errors=True)
             except Exception:
-                pass
+        pass
 
     def render(
         self,
@@ -891,8 +1105,14 @@ class VideoEditor:
         Renders the final video from an EDL produced by CreativeDirector.
         """
         self.skipped_clips = []
-        validated_edl = validate_edl(edl, self.clips_dir)
-        edl = validated_edl.model_dump(mode="json")
+        try:
+            validated_edl = validate_edl(edl, self.clips_dir)
+            edl = validated_edl.model_dump(mode="json")
+        except Exception as exc:
+            if os.getenv("EDL_VALIDATION_FAIL", "stop").strip().lower() == "pass":
+                logger.warning(f"EDL validation failed in rendering phase: {exc}. EDL_VALIDATION_FAIL is 'pass', so bypassing validation check.")
+            else:
+                raise exc
 
         timeline = edl.get("timeline", [])
         if not timeline:
@@ -914,6 +1134,7 @@ class VideoEditor:
         processed_durations = []
         transitions = []
         processed_has_audio = []
+        original_music_volumes = []
         temp_dir = tempfile.mkdtemp(prefix="video_editor_", dir=self.output_dir)
         
         beat_times = rhythm_data.get("beat_times", []) if rhythm_data else []
@@ -997,6 +1218,10 @@ class VideoEditor:
                     keep_aud = details.get("keep_original_audio", True)
                     has_aud = (not is_image) and self._check_has_audio(clip_path) and keep_aud
 
+                    audio_ducking = item.get("audio_ducking") or {}
+                    orig_audio_vol = audio_ducking.get("original_audio_volume")
+                    music_vol = audio_ducking.get("music_volume_during_segment")
+
                     processed_dur = self._process_single_clip(
                         clip_path=clip_path,
                         is_image=is_image,
@@ -1013,13 +1238,24 @@ class VideoEditor:
                         dynamic_style=dynamic_style,
                         sticker_path=item.get("sticker_path"),
                         sticker_position=item.get("sticker_position", "bottom-center"),
-                        effect_path=item.get("effect_path")
+                        effect_path=item.get("effect_path"),
+                        color_grade=item.get("color_grade"),
+                        speed_preset=item.get("speed_preset"),
+                        speed_keyframes=item.get("speed_keyframes"),
+                        reverse=item.get("reverse", False),
+                        stabilize=item.get("stabilize", False),
+                        stabilize_strength=item.get("stabilize_strength", 0.5),
+                        text_preset=item.get("text_preset"),
+                        text_animation=item.get("text_animation"),
+                        sticker_animation=item.get("sticker_animation"),
+                        original_audio_volume=orig_audio_vol
                     )
                     
                     processed_temp_files.append(temp_clip_path)
                     processed_durations.append(processed_dur)
                     transitions.append(transition)
                     processed_has_audio.append(has_aud)
+                    original_music_volumes.append(music_vol)
 
                     media_type_label = "photo" if is_image else "video"
                     logger.info(
@@ -1034,6 +1270,165 @@ class VideoEditor:
             if not processed_temp_files:
                 raise RuntimeError("No valid clips were processed. Check clips directory and EDL.")
 
+            # Second Pass: Bake spatial-reveal transitions
+            from backend_ai.effects.spatial_transitions import create_spatial_transition
+
+            SPATIAL_TRANSITIONS = {
+                "wipe_left", "wipe_right", "wipe_up", "wipe_down",
+                "wipe_diagonal_tl", "wipe_diagonal_tr", "wipe_diagonal_bl", "wipe_diagonal_br",
+                "split_horizontal", "split_vertical", "clock_wipe",
+                "iris", "iris_circle", "diamond", "heart", 
+                "blinds_horizontal", "blinds_vertical", "checkerboard",
+                "glitch", "pixelate", "spin", "ripple", "blur", "light_leak",
+                "slide_left", "slide_right", "slide_up", "slide_down", "slide_push"
+            }
+
+            # Determine sync fade duration based on rhythm_data tempo
+            if rhythm_data and rhythm_data.get("tempo", 0.0) > 0:
+                beat_duration = 60.0 / rhythm_data["tempo"]
+                style_lower = edl.get("style", "cinematic").lower()
+                if any(s in style_lower for s in ["fast", "energy", "ramp", "action", "travel"]):
+                    beat_fraction = 0.5
+                else:
+                    beat_fraction = 1.0
+                sync_fade_duration = beat_duration * beat_fraction
+                sync_fade_duration = max(0.1, min(1.0, sync_fade_duration))
+            else:
+                sync_fade_duration = self.DEFAULT_FADE_DURATION
+
+            i = 0
+            i = 0
+            baked_paths = []
+            baked_durations = []
+            baked_transitions = []
+            baked_has_audio = []
+            baked_music_volumes = []
+
+            # Start with the first clip
+            current_path = processed_temp_files[0]
+            current_duration = processed_durations[0]
+            current_has_audio = processed_has_audio[0]
+            current_music_volume = original_music_volumes[0]
+
+            while i < len(processed_temp_files) - 1:
+                next_transition = (transitions[i + 1] or "none").lower()
+
+                if next_transition in SPATIAL_TRANSITIONS:
+                    next_path = processed_temp_files[i + 1]
+                    next_duration = processed_durations[i + 1]
+                    next_has_audio = processed_has_audio[i + 1]
+                    next_music_volume = original_music_volumes[i + 1]
+                    next_params = timeline[i + 1].get("transition_params") or {}
+
+                    fade_dur = min(sync_fade_duration, current_duration / 2, next_duration / 2)
+                    if fade_dur > 0.05:
+                        logger.info(f"Baking spatial transition '{next_transition}' between clip {i} and {i+1} with duration {fade_dur:.3f}s")
+
+                        # Generate temp file paths
+                        trimmed_a_path = os.path.join(temp_dir, f"clip_{i}_trimmed_end.mp4")
+                        trans_path = os.path.join(temp_dir, f"trans_{i}_{i+1}.mp4")
+                        trimmed_b_path = os.path.join(temp_dir, f"clip_{i+1}_trimmed_start.mp4")
+
+                        try:
+                            # Trim A (keep [0, current_duration - fade_dur])
+                            dur_a_trimmed = current_duration - fade_dur
+                            cmd_trim_a = [
+                                "ffmpeg", "-y", "-nostdin",
+                                "-i", current_path,
+                                "-t", f"{dur_a_trimmed:.3f}",
+                                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                                "-c:a", "aac", trimmed_a_path
+                            ]
+                            subprocess.run(cmd_trim_a, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=90, stdin=subprocess.DEVNULL)
+
+                            # Trim B (keep [fade_dur, next_duration])
+                            dur_b_trimmed = next_duration - fade_dur
+                            cmd_trim_b = [
+                                "ffmpeg", "-y", "-nostdin",
+                                "-i", next_path,
+                                "-ss", f"{fade_dur:.3f}",
+                                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                                "-c:a", "aac", trimmed_b_path
+                            ]
+                            subprocess.run(cmd_trim_b, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=90, stdin=subprocess.DEVNULL)
+
+                            # Create spatial transition video in python
+                            create_spatial_transition(
+                                clip_a_path=current_path,
+                                clip_b_path=next_path,
+                                transition_name=next_transition,
+                                duration=fade_dur,
+                                output_path=trans_path,
+                                fps=30,
+                                frame_size=(self.target_h, self.target_w),
+                                transition_params=next_params
+                            )
+
+                            # Append trimmed A
+                            baked_paths.append(trimmed_a_path)
+                            baked_durations.append(dur_a_trimmed)
+                            baked_transitions.append("none")
+                            baked_has_audio.append(current_has_audio)
+                            baked_music_volumes.append(current_music_volume)
+
+                            # Append baked transition
+                            baked_paths.append(trans_path)
+                            baked_durations.append(fade_dur)
+                            baked_transitions.append("none")
+                            baked_has_audio.append(current_has_audio or next_has_audio)
+                            # Transition volume is average of the two
+                            avg_vol = None
+                            if current_music_volume is not None and next_music_volume is not None:
+                                avg_vol = (current_music_volume + next_music_volume) / 2
+                            elif current_music_volume is not None:
+                                avg_vol = current_music_volume
+                            elif next_music_volume is not None:
+                                avg_vol = next_music_volume
+                            baked_music_volumes.append(avg_vol)
+
+                            # Set trimmed B as current clip for next iteration
+                            current_path = trimmed_b_path
+                            current_duration = dur_b_trimmed
+                            current_has_audio = next_has_audio
+                            current_music_volume = next_music_volume
+
+                            # Mark transition as none for the next step
+                            transitions[i + 1] = "none"
+
+                            i += 1
+                            continue
+                        except Exception as e:
+                            logger.error(f"Failed to bake spatial transition '{next_transition}' between clip {i} and {i+1}: {e}")
+                            # Fallback to normal concatenation
+                            pass
+
+                # If no spatial transition or baking failed, append current clip as is
+                baked_paths.append(current_path)
+                baked_durations.append(current_duration)
+                baked_transitions.append(transitions[i])
+                baked_has_audio.append(current_has_audio)
+                baked_music_volumes.append(current_music_volume)
+
+                # Advance to next
+                i += 1
+                current_path = processed_temp_files[i]
+                current_duration = processed_durations[i]
+                current_has_audio = processed_has_audio[i]
+                current_music_volume = original_music_volumes[i]
+
+            # Append the final remaining clip
+            baked_paths.append(current_path)
+            baked_durations.append(current_duration)
+            baked_transitions.append(transitions[-1])
+            baked_has_audio.append(current_has_audio)
+            baked_music_volumes.append(current_music_volume)
+
+            processed_temp_files = baked_paths
+            processed_durations = baked_durations
+            transitions = baked_transitions
+            processed_has_audio = baked_has_audio
+            original_music_volumes = baked_music_volumes
+
             self._build_ffmpeg_concat(
                 clip_paths=processed_temp_files,
                 clip_durations=processed_durations,
@@ -1044,6 +1439,7 @@ class VideoEditor:
                 music_start_offset=float(edl.get("music_start_offset", 0.0)),
                 tempo=rhythm_data.get("tempo", 0.0) if rhythm_data else 0.0,
                 style=edl.get("style", "cinematic"),
+                music_volumes=original_music_volumes,
             )
 
             # Enforce exact target duration (trim/pad final video)

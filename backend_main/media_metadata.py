@@ -36,6 +36,7 @@ def _probe_video(file_path: str) -> Optional[Dict[str, Any]]:
             capture_output=True,
             text=True,
             check=True,
+            stdin=subprocess.DEVNULL,
         )
         return json.loads(result.stdout)
     except (FileNotFoundError, subprocess.CalledProcessError, json.JSONDecodeError):

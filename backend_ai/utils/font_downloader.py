@@ -61,49 +61,60 @@ def download_font_from_google(font_name: str, weight: int = 700) -> str:
         
     # 2. Try fetching from Google Fonts API
     font_family_escaped = urllib.parse.quote_plus(font_name)
-    css_url = f"https://fonts.googleapis.com/css2?family={font_family_escaped}:wght@{weight}"
+    css_urls = [
+        f"https://fonts.googleapis.com/css2?family={font_family_escaped}:wght@{weight}"
+    ]
+    if weight != 400:
+        css_urls.append(f"https://fonts.googleapis.com/css2?family={font_family_escaped}:wght@400")
+    css_urls.append(f"https://fonts.googleapis.com/css2?family={font_family_escaped}")
     
     # Custom older Android User-Agent to force the CSS API to return .ttf format
     headers = {
         "User-Agent": "Mozilla/5.0 (Linux; U; Android 2.2; en-us; Nexus One Build/FRF91) AppleWebKit/533.1 (KHTML, like Gecko) Version/4.0 Mobile Safari/533.1"
     }
     
-    logger.info(f"Fetching font CSS from Google: {css_url}")
-    try:
-        req = urllib.request.Request(css_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as response:
-            css_content = response.read().decode('utf-8')
+    last_error = None
+    for css_url in css_urls:
+        logger.info(f"Fetching font CSS from Google: {css_url}")
+        try:
+            req = urllib.request.Request(css_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as response:
+                css_content = response.read().decode('utf-8')
+                
+            # Parse the url(...) target out of the CSS content
+            match = re.search(r"url\((https://fonts\.gstatic\.com/[^)]+)\)", css_content)
+            if not match:
+                raise ValueError("Could not parse font file URL from Google Fonts CSS response.")
+                
+            font_url = match.group(1)
+            logger.info(f"Downloading TTF from Google CDN: {font_url}")
             
-        # Parse the url(...) target out of the CSS content
-        match = re.search(r"url\((https://fonts\.gstatic\.com/[^)]+)\)", css_content)
-        if not match:
-            raise ValueError("Could not parse font file URL from Google Fonts CSS response.")
+            # Download font file
+            font_req = urllib.request.Request(font_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(font_req, timeout=15) as res:
+                font_data = res.read()
+                
+            # Write to temporary file first for validation
+            temp_dest = dest_path + ".tmp"
+            with open(temp_dest, "wb") as f:
+                f.write(font_data)
+                
+            if validate_font_file(temp_dest):
+                os.replace(temp_dest, dest_path)
+                official_name = get_font_family_name(dest_path)
+                logger.info(f"Successfully cached Google Font: {font_name} (Official: {official_name})")
+                return dest_path
+            else:
+                if os.path.exists(temp_dest):
+                    os.remove(temp_dest)
+                raise ValueError("Downloaded file failed fonttools validation.")
+                
+        except Exception as e:
+            last_error = e
+            logger.info(f"Failed to fetch or process font from {css_url}: {e}")
             
-        font_url = match.group(1)
-        logger.info(f"Downloading TTF from Google CDN: {font_url}")
-        
-        # Download font file
-        font_req = urllib.request.Request(font_url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(font_req, timeout=15) as res:
-            font_data = res.read()
-            
-        # Write to temporary file first for validation
-        temp_dest = dest_path + ".tmp"
-        with open(temp_dest, "wb") as f:
-            f.write(font_data)
-            
-        if validate_font_file(temp_dest):
-            os.replace(temp_dest, dest_path)
-            official_name = get_font_family_name(dest_path)
-            logger.info(f"Successfully cached Google Font: {font_name} (Official: {official_name})")
-            return dest_path
-        else:
-            if os.path.exists(temp_dest):
-                os.remove(temp_dest)
-            raise ValueError("Downloaded file failed fonttools validation.")
-            
-    except Exception as e:
-        logger.warning(f"Failed to download Google Font '{font_name}': {e}")
+    if last_error:
+        logger.warning(f"Failed to download Google Font '{font_name}' after trying all weight options. Last error: {last_error}")
         
     return ""
 

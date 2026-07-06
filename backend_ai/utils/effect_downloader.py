@@ -11,7 +11,7 @@ from typing import Optional
 logger = logging.getLogger("agents.effect_downloader")
 
 # Directory configurations
-CACHE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../..", "data", "cache"))
+CACHE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../..", "cache", "shared"))
 STICKERS_DIR = os.path.join(CACHE_DIR, "stickers")
 EFFECTS_DIR = os.path.join(CACHE_DIR, "effects")
 
@@ -138,14 +138,18 @@ def download_pixabay_effect(query: str, retries: int = 3) -> Optional[str]:
         logger.warning("PIXABAY_API_KEY is not set. Trying local fallback.")
         return _get_local_fallback(LOCAL_EFFECTS_DIR, normalized)
         
-    encoded_query = urllib.parse.quote_plus(query)
-    url = f"https://pixabay.com/api/videos/?key={api_key}&q={encoded_query}&video_type=film&per_page=5"
+    search_query = query
+    if "black background" not in query.lower():
+        search_query = f"{query} black background"
+
+    encoded_query = urllib.parse.quote_plus(search_query)
+    url = f"https://pixabay.com/api/videos/?key={api_key}&q={encoded_query}&video_type=film&per_page=20"
     
     headers = {"User-Agent": "Mozilla/5.0"}
     
     for attempt in range(retries):
         try:
-            logger.info(f"Searching Pixabay videos (Attempt {attempt+1}/{retries}) for query: '{query}'")
+            logger.info(f"Searching Pixabay videos (Attempt {attempt+1}/{retries}) for query: '{search_query}'")
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=10) as response:
                 res_data = json.loads(response.read().decode('utf-8'))
@@ -154,8 +158,37 @@ def download_pixabay_effect(query: str, retries: int = 3) -> Optional[str]:
                     logger.warning(f"No Pixabay videos found for query: '{query}'")
                     break
                     
+                # Filter hits to find clean overlay loops (no scenic/landscape/nature footage)
+                selected_hit = None
+                scenic_keywords = {
+                    "forest", "nature", "mountain", "sky", "trees", "landscape", "sea", 
+                    "river", "lake", "ocean", "field", "grass", "sun", "sunset", "sunrise",
+                    "scenery", "road", "city", "street", "car", "people", "man", "woman",
+                    "house", "building", "real", "aerial", "drone", "beach", "clouds",
+                    "park", "hill", "desert", "garden", "flower", "animal", "bird"
+                }
+                
+                for hit in hits:
+                    tags = [t.strip().lower() for t in hit.get("tags", "").split(",")]
+                    is_clean = True
+                    for tag in tags:
+                        for kw in scenic_keywords:
+                            if kw in tag or tag in kw:
+                                is_clean = False
+                                break
+                        if not is_clean:
+                            break
+                    if is_clean:
+                        selected_hit = hit
+                        logger.info(f"Selected clean Pixabay overlay hit with tags: {hit.get('tags')}")
+                        break
+                        
+                if not selected_hit:
+                    logger.warning("No clean overlay hit found in Pixabay search results. Falling back to the first result.")
+                    selected_hit = hits[0]
+                    
                 # Get the download URL for small or medium video format
-                video_res = hits[0].get("videos", {})
+                video_res = selected_hit.get("videos", {})
                 # Try medium first, then small, then tiny, then large
                 video_info = video_res.get("medium") or video_res.get("small") or video_res.get("tiny") or video_res.get("large")
                 if not video_info or not video_info.get("url"):

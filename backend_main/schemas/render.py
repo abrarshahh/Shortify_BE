@@ -6,9 +6,18 @@ class OutputVideoResponse(BaseModel):
     project_id: uuid.UUID
     output_video: Optional[str] = None
 
+from backend_main.schemas.enums import DurationEnum, AspectRatioEnum, StyleEnum
+
 class RenderRequest(BaseModel):
     prompt: str
     output_filename: Optional[str] = "final_output.mp4"
+    target_duration: DurationEnum
+    aspect_ratio: AspectRatioEnum = AspectRatioEnum.nine_sixteen
+    style: Optional[StyleEnum] = None
+    caption_style: Optional[str] = "none"
+    add_subtitle: bool
+    add_stickers: bool
+    add_textoverlay: bool
 
 class RenderResponse(BaseModel):
     project_id: uuid.UUID
