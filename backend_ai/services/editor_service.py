@@ -1089,7 +1089,7 @@ class VideoEditor:
             try:
                 shutil.rmtree(temp_dir, ignore_errors=True)
             except Exception:
-        pass
+                pass
 
     def render(
         self,
