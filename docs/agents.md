@@ -24,7 +24,7 @@ Shortify AI leverages a team of cooperative, specialized AI agents orchestrated 
   1. Uploads video assets to Google AI Studio.
   2. Prompts Gemini 1.5 Flash using structured instructions to analyze temporal regions.
   3. Extract key details for each segment: action descriptions, visual aesthetic quality score, primary subjects, face/speaking tracking, shot composition types (close-up, wide-shot), and brightness level.
-  4. Returns structured analyses conforming to [media.py](file:///d:/ME/Shortify_BE/backend_ai/schemas/edl.py) schema formats.
+  4. Returns structured analyses conforming to [media.py](../backend_ai/schemas/edl.py) schema formats.
 
 ### 1.3 CreativeDirector (`director_agent.py`)
 - **Role**: Evaluates target constraints, music beat grids, and media semantics to design a cohesive, pacing-accurate edit plan.
@@ -38,7 +38,7 @@ Shortify AI leverages a team of cooperative, specialized AI agents orchestrated 
 ### 1.4 VideoEditor (`editor_service.py`)
 - **Role**: Reads the planned EDL structure, downloads visual overlays/stickers, and runs local rendering pipelines to compile clips.
 - **Technology**: FFmpeg, OpenCV (`cv2`), `ffmpeg-python`, Giphy, and Pixabay APIs.
-- **Workflow**: Performs early constant frame rate (CFR) resampling at 30 fps, stabilized pre-rendering, crop-scaling, speed adjustments (constant and speed-ramping curves), and audio-video stitching (see the [Rendering Pipeline document](file:///d:/ME/Shortify_BE/docs/rendering_pipeline.md) for depth).
+- **Workflow**: Performs early constant frame rate (CFR) resampling at 30 fps, stabilized pre-rendering, crop-scaling, speed adjustments (constant and speed-ramping curves), and audio-video stitching (see the [Rendering Pipeline document](rendering_pipeline.md) for depth).
 
 ### 1.5 SubtitleAgent (`subtitle_agent.py` & `subtitle_service.py`)
 - **Role**: Performs speech-to-text conversion and validates text overlay safe zones.

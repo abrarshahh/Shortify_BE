@@ -8,15 +8,15 @@ The system is built on a **LangGraph state machine** that coordinates specialize
 
 ## 📂 Documentation Index
 
-Detailed architectural specs, agent guidelines, and setup details are located under the **[docs/](file:///d:/ME/Shortify_BE/docs/)** folder:
+Detailed architectural specs, agent guidelines, and setup details are located under the **[docs/](docs)** folder:
 
-1. **[docs/architecture.md](file:///d:/ME/Shortify_BE/docs/architecture.md) (System Architecture)**: Explains the multi-layer split (FastAPI routers vs. LangGraph), sequence diagram of a render lifecycle request, and orchestrator state machine variables (`AgentState`).
-2. **[docs/agents.md](file:///d:/ME/Shortify_BE/docs/agents.md) (AI Agent Directory)**: Explains the roles, models, and options of the 5 agents (Rhythm, Media, Director, Editor, Subtitle), API key rotation, key pinning/ownership details, and the project cache directory structure.
-3. **[docs/rendering_pipeline.md](file:///d:/ME/Shortify_BE/docs/rendering_pipeline.md) (Video Compositing Engine)**: Explains the FFmpeg and OpenCV compositing engine, early 30 fps CFR conversion (how it solves variable/high-framerate glitches), speed ramping curves, spatial transitions, and dynamic amix background music ducking.
-4. **[docs/database_and_env.md](file:///d:/ME/Shortify_BE/docs/database_and_env.md) (Database Schema & Config)**: Explains the database ERD, SQLAlchemy mappings, detailed configurations, and database reset logic.
-5. **[docs/api_reference.md](file:///d:/ME/Shortify_BE/docs/api_reference.md) (API Endpoint Catalog)**: Catalog of routes (Auth, Projects, Media, Audio, Render) and JSON schemas.
-6. **[docs/testing.md](file:///d:/ME/Shortify_BE/docs/testing.md) (Testing Guide)**: Explains the automated test suite structure, unit/integration test files, and verification commands.
-7. **[docs/error_handling.md](file:///d:/ME/Shortify_BE/docs/error_handling.md) (Error Handling & Fault Tolerance)**: Details Google API rate-limiting, safety self-correction loops, and validation error bypasses.
+1. **[System Architecture](docs/architecture.md)**: Explains the multi-layer split (FastAPI routers vs. LangGraph), sequence diagram of a render lifecycle request, and orchestrator state machine variables (`AgentState`).
+2. **[AI Agent Directory](docs/agents.md)**: Explains the roles, models, and options of the 5 agents (Rhythm, Media, Director, Editor, Subtitle), API key rotation, key pinning/ownership details, and the project cache directory structure.
+3. **[Video Compositing Engine](docs/rendering_pipeline.md)**: Explains the FFmpeg and OpenCV compositing engine, early 30 fps CFR conversion (how it solves variable/high-framerate glitches), speed ramping curves, spatial transitions, and dynamic amix background music ducking.
+4. **[Database Schema & Configuration](docs/database_and_env.md)**: Explains the database ERD, SQLAlchemy mappings, detailed configurations, and database reset logic.
+5. **[API Endpoint Catalog](docs/api_reference.md)**: Catalog of routes (Auth, Projects, Media, Audio, Render) and JSON schemas.
+6. **[Testing Guide](docs/testing.md)**: Explains the automated test suite structure, unit/integration test files, and verification commands.
+7. **[Error Handling & Fault Tolerance](docs/error_handling.md)**: Details Google API rate-limiting, safety self-correction loops, and validation error bypasses.
 
 ---
 
@@ -73,7 +73,7 @@ Shortify is separated into two modules:
 1. **AI Engine Layer (`backend_ai/`)**: Stateful LangGraph orchestrator, agent actions, media parsing, and video compositing.
 2. **Web API Layer (`backend_main/`)**: FastAPI routing, JWT authentication, schema validation, and background worker threads.
 
-Read the detailed [System Architecture Document](file:///d:/ME/Shortify_BE/docs/architecture.md) for sequence flows and state descriptions.
+Read the detailed [System Architecture Document](docs/architecture.md) for sequence flows and state descriptions.
 
 ---
 
@@ -144,7 +144,7 @@ flowchart TD
    - Whisper transcribes spoken tracks, generates word-level timestamps, and burns captions to the video.
    - *End Result*: `trek.mp4` (Final Dynamic social video).
 
-For code parameters and transition details, read the [AI Agents Document](file:///d:/ME/Shortify_BE/docs/agents.md) and [Video Editing Engine Document](file:///d:/ME/Shortify_BE/docs/rendering_pipeline.md).
+For code parameters and transition details, read the [AI Agents Document](docs/agents.md) and [Video Editing Engine Document](docs/rendering_pipeline.md).
 
 ---
 
@@ -157,7 +157,7 @@ Create a `.env` file in the project root. The structure must align with `.env.ex
 - **PIXABAY_APPLY**: Set to `false` to disable Pixabay visual overlay application, preventing overlay downloads.
 - **EDL_VALIDATION_FAIL**: Set to `pass` to gracefully proceed with editing if validation checks fail on the 3rd attempt, preventing rendering interruptions.
 
-For database tables and models, read the [Database Schema & Configuration Document](file:///d:/ME/Shortify_BE/docs/database_and_env.md).
+For database tables and models, read the [Database Schema & Configuration Document](docs/database_and_env.md).
 
 ---
 
