@@ -162,7 +162,7 @@ def replace_project_audio(
         db.add(ProjectMediaAsset(project_id=project_id, media_asset_id=new_audio_id))
         
     # If old was music_id, update to new
-    if str(project.music_id) == old_audio_id:
+    if project.music_id == old_audio_id:
         project.music_id = new_audio_id
         
     db.commit()
@@ -216,11 +216,17 @@ def remove_audio_from_project(
         ProjectMediaAsset.media_asset_id == audio_id
     ).first()
     
+    relation_exists = False
+    
     if link:
         db.delete(link)
-        # If this was the selected music, nullify it
-        if project.music_id == audio_id:
-            project.music_id = None
+        relation_exists = True
+        
+    if project.music_id == audio_id:
+        project.music_id = None
+        relation_exists = True
+        
+    if relation_exists:
         db.commit()
         return {"message": "Relation broken"}
     raise HTTPException(404, "Relation not found")

@@ -29,20 +29,30 @@ def list_all_projects(
 
     result = []
     for proj in projects:
-        job = worker_service.render_jobs.get(str(proj.id), {})
-        result.append(
-            ProjectListItem(
-                id=str(proj.id),
-                title=proj.title,
-                description=proj.description,
-                target_duration=proj.target_duration,
-                aspect_ratio=proj.aspect_ratio,
-                style=proj.style,
-                caption_style=proj.caption_style,
-                created_at=proj.created_at,
-                render_status=job.get("status", "not_started"),
-            )
-        )
+      job = worker_service.render_jobs.get(str(proj.id), {})
+      status = job.get("status")
+      if not status:
+          if proj.is_rendering:
+              status = "running"
+          elif proj.last_output_path:
+              status = "done"
+          else:
+              status = "not_started"
+      
+      result.append(
+          ProjectListItem(
+              id=str(proj.id),
+              title=proj.title,
+              description=proj.description,
+              target_duration=proj.target_duration,
+              aspect_ratio=proj.aspect_ratio,
+              style=proj.style,
+              caption_style=proj.caption_style,
+              last_output_path=proj.last_output_path,
+              created_at=proj.created_at,
+              render_status=status,
+          )
+      )
 
     return result
 
@@ -70,6 +80,7 @@ def create_project(
         style=proj.style,
         caption_style=proj.caption_style,
         music_id=str(proj.music_id) if proj.music_id else None,
+        last_output_path=proj.last_output_path,
         created_at=proj.created_at
     )
 
@@ -110,6 +121,7 @@ def get_project_details(
         style=project.style,
         caption_style=project.caption_style,
         music_id=str(project.music_id) if project.music_id else None,
+        last_output_path=project.last_output_path,
         created_at=project.created_at,
         media=media_list
     )

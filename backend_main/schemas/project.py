@@ -18,6 +18,7 @@ class ProjectResponse(BaseModel):
     style: Optional[str] = None
     caption_style: Optional[str] = None
     music_id: Optional[uuid.UUID]
+    last_output_path: Optional[str] = None
     created_at: datetime
 
 class ProjectDetailResponse(ProjectResponse):
@@ -31,5 +32,6 @@ class ProjectListItem(BaseModel):
     aspect_ratio: Optional[str] = None
     style: Optional[str] = None
     caption_style: Optional[str] = None
+    last_output_path: Optional[str] = None
     created_at: Optional[datetime]
     render_status: str  # not_started | running | done | error
