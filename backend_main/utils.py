@@ -3,6 +3,7 @@ from pathlib import Path
 from fastapi import UploadFile, HTTPException
 from backend_main.config import STORAGE_ROOT
 from backend_main.media_metadata import extract_media_metadata
+from backend_main.supabase_storage import upload_to_supabase
 
 # Extensions that browsers / curl may not label with a proper MIME type
 _ALLOWED_EXTENSIONS = {
@@ -21,9 +22,17 @@ def save_upload_file(user_id: str, upload_file: UploadFile) -> str:
     full_dir.mkdir(parents=True, exist_ok=True)
     filename = f"{media_id}{ext}"
     full_path = full_dir / filename
+    
+    # Save locally first
+    upload_file.file.seek(0)
     with full_path.open("wb") as f:
         f.write(upload_file.file.read())
-    return str((rel_dir / filename))  # relative path to store in DB
+        
+    # Upload to Supabase if configured
+    storage_path = f"users/{user_id}/media/{filename}"
+    upload_to_supabase(str(full_path), storage_path, mime_type=upload_file.content_type)
+    
+    return storage_path
 
 def validate_file(upload_file: UploadFile) -> None:
     mime = upload_file.content_type or ""

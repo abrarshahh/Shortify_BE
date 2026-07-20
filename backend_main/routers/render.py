@@ -48,6 +48,15 @@ def trigger_render(
         logger.warning(f"[Render API] Project {project_id} has no media assets linked in the database.")
         raise HTTPException(400, "No video media found for this project.")
 
+    from backend_main.supabase_storage import download_from_supabase
+
+    # Download missing media assets from Supabase if they are not present on local disk
+    for asset in media_assets:
+        local_path = STORAGE_ROOT / asset.storage_path
+        if not os.path.exists(local_path):
+            logger.info(f"[Render API] Missing media asset: {asset.storage_path}. Attempting download from Supabase Storage...")
+            download_from_supabase(asset.storage_path, str(local_path))
+
     video_paths = [
         str(STORAGE_ROOT / asset.storage_path)
         for asset in media_assets
@@ -67,6 +76,9 @@ def trigger_render(
         music_asset = db.query(MediaAsset).filter(MediaAsset.id == project.music_id).first()
         if music_asset:
             candidate = str(STORAGE_ROOT / music_asset.storage_path)
+            if not os.path.exists(candidate):
+                logger.info(f"[Render API] Missing music asset: {music_asset.storage_path}. Attempting download from Supabase Storage...")
+                download_from_supabase(music_asset.storage_path, candidate)
             if os.path.exists(candidate):
                 music_path = candidate
 

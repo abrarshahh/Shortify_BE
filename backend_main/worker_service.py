@@ -142,6 +142,23 @@ def _execute_render_task(
         finally:
             db.close()
 
+        # 1. Download existing project cache files from Supabase if they exist
+        from backend_main.supabase_storage import download_from_supabase, upload_to_supabase
+        
+        cache_files = [
+            "clip_scores/clip_scores.json",
+            "media_analysis/media_analysis.json",
+            "music_analysis/music_analysis.json",
+            "director_analysis/director_analysis.json",
+            "metadata/metadata.json"
+        ]
+        
+        for f_subpath in cache_files:
+            supabase_path = f"cache/{user_folder}/{project_id}/{f_subpath}"
+            local_cache_path = os.path.join("cache", user_folder, project_id, f_subpath.replace('/', os.sep))
+            if not os.path.exists(local_cache_path):
+                download_from_supabase(supabase_path, local_cache_path)
+
         # Instantiate orchestrator
         orchestrator = ShortifyOrchestrator(
             exports_dir=str(STORAGE_ROOT / "exports" / project_id),
@@ -164,16 +181,38 @@ def _execute_render_task(
                 except Exception as e:
                     logger.warning(f"[Worker] Failed to delete intermediate file {p}: {e}")
 
-        # Save result to DB
+        # Save result to DB & Upload outputs, cache, and logs to Supabase
         db = SessionLocal()
         try:
             pid_uuid = uuid.UUID(project_id)
             proj = db.query(Project).filter(Project.id == pid_uuid).first()
             if proj:
                 # Save as relative path to STORAGE_ROOT
-                rel_path = str(os.path.relpath(final_video, STORAGE_ROOT))
+                rel_path = str(os.path.relpath(final_video, STORAGE_ROOT)).replace('\\', '/')
                 proj.last_output_path = rel_path
                 db.commit()
+                
+                # Upload the final video
+                upload_to_supabase(final_video, rel_path, mime_type="video/mp4")
+                
+                # Upload the thumbnail if exists
+                thumb_local = os.path.join(os.path.dirname(final_video), "thumbnail.jpg")
+                if os.path.exists(thumb_local):
+                    upload_to_supabase(thumb_local, f"exports/{project_id}/thumbnail.jpg", mime_type="image/jpeg")
+                    
+                # Upload cache files to Supabase
+                for f_subpath in cache_files:
+                    local_cache_path = os.path.join("cache", user_folder, project_id, f_subpath.replace('/', os.sep))
+                    if os.path.exists(local_cache_path):
+                        supabase_path = f"cache/{user_folder}/{project_id}/{f_subpath}"
+                        upload_to_supabase(local_cache_path, supabase_path, mime_type="application/json")
+                        
+                # Upload run logs
+                log_files = ["app.log", "error.log", "agents.log"]
+                for log_file in log_files:
+                    local_log = os.path.join("logs", log_file)
+                    if os.path.exists(local_log):
+                        upload_to_supabase(local_log, f"logs/{project_id}/{log_file}", mime_type="text/plain")
         finally:
             db.close()
 

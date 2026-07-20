@@ -24,7 +24,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/storage", StaticFiles(directory="storage"), name="storage")
+@app.get("/storage/{file_path:path}")
+def get_storage_file(file_path: str):
+    import os
+    from fastapi.responses import FileResponse, RedirectResponse
+    from fastapi import HTTPException
+    
+    local_file = os.path.join("storage", file_path)
+    
+    # 1. If the file exists locally, serve it directly
+    if os.path.exists(local_file) and os.path.isfile(local_file):
+        return FileResponse(local_file)
+        
+    # 2. Otherwise, if Supabase is configured, redirect to the permanent copy
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_bucket = os.getenv("SUPABASE_BUCKET", "shortify")
+    if supabase_url:
+        public_url = f"{supabase_url}/storage/v1/object/public/{supabase_bucket}/{file_path}"
+        return RedirectResponse(url=public_url)
+        
+    # 3. Fallback
+    raise HTTPException(status_code=404, detail="File not found")
 
 app.include_router(auth_router)
 app.include_router(projects_router)
