@@ -32,6 +32,24 @@ app.include_router(media_router)
 app.include_router(audio_router)
 app.include_router(render_router)
 
+@app.get("/debug/storage")
+def debug_storage():
+    import os
+    files_list = []
+    for root, dirs, files in os.walk("storage"):
+        for f in files:
+            full_path = os.path.join(root, f)
+            files_list.append({
+                "path": full_path,
+                "size_bytes": os.path.getsize(full_path)
+            })
+    return {
+        "cwd": os.getcwd(),
+        "storage_exists": os.path.exists("storage"),
+        "files_count": len(files_list),
+        "files": files_list
+    }
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
