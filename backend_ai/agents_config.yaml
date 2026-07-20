@@ -21,6 +21,13 @@ creative_director:
     - "gemini-1.5-pro"
     - "gemini-1.5-flash"
 
+editing_inspector:
+  provider: "google"
+  model: "gemini-2.5-flash"
+  fallback_models:
+    - "gemini-2.5-pro"
+    - "gemini-1.5-pro"
+
 subtitle_agent:
   provider: "openai-whisper" # Local whisper
   model_size: "base"

@@ -5,14 +5,18 @@ from sqlalchemy.orm import Session
 from backend_main.config import SessionLocal, logger, STORAGE_ROOT
 from backend_main.models import Project, User, MediaAsset, ProjectMediaAsset
 from backend_main.auth import get_current_user
-from backend_main.schemas import ProjectCreate, ProjectResponse, ProjectDetailResponse, MediaResponse, ProjectListItem
+from backend_main.schemas import ProjectCreate, ProjectResponse, ProjectDetailResponse, MediaResponse, ProjectListItem, ProjectUpdate
 from backend_main import worker_service
-from typing import List
+from typing import List, Optional
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
 
 @router.get("", response_model=List[ProjectListItem])
 def list_all_projects(
+    limit: int = 10,
+    offset: int = 0,
+    search: Optional[str] = None,
+    status: Optional[str] = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(lambda: SessionLocal()),
 ):
@@ -20,25 +24,29 @@ def list_all_projects(
     Returns all projects belonging to the authenticated user,
     along with their current render status.
     """
-    projects = (
-        db.query(Project)
-        .filter(Project.user_id == user.id)
-        .order_by(Project.created_at.desc())
-        .all()
-    )
+    query = db.query(Project).filter(Project.user_id == user.id)
+    if search:
+        query = query.filter(
+            (Project.title.ilike(f"%{search}%")) |
+            (Project.description.ilike(f"%{search}%"))
+        )
+    projects = query.order_by(Project.created_at.desc()).all()
 
     result = []
     for proj in projects:
       job = worker_service.render_jobs.get(str(proj.id), {})
-      status = job.get("status")
-      if not status:
+      proj_status = job.get("status")
+      if not proj_status:
           if proj.is_rendering:
-              status = "running"
+              proj_status = "running"
           elif proj.last_output_path:
-              status = "done"
+              proj_status = "done"
           else:
-              status = "not_started"
+              proj_status = "not_started"
       
+      if status and proj_status != status:
+          continue
+
       result.append(
           ProjectListItem(
               id=str(proj.id),
@@ -50,11 +58,11 @@ def list_all_projects(
               caption_style=proj.caption_style,
               last_output_path=proj.last_output_path,
               created_at=proj.created_at,
-              render_status=status,
+              render_status=proj_status,
           )
       )
 
-    return result
+    return result[offset : offset + limit]
 
 @router.post("", response_model=ProjectResponse, status_code=201)
 def create_project(
@@ -82,6 +90,37 @@ def create_project(
         music_id=str(proj.music_id) if proj.music_id else None,
         last_output_path=proj.last_output_path,
         created_at=proj.created_at
+    )
+
+@router.patch("/{project_id}", response_model=ProjectResponse)
+def update_project(
+    project_id: uuid.UUID,
+    project_data: ProjectUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(lambda: SessionLocal())
+):
+    proj = db.query(Project).filter(Project.id == project_id, Project.user_id == user.id).first()
+    if not proj:
+        raise HTTPException(404, "Project not found")
+
+    update_dict = project_data.model_dump(exclude_unset=True)
+    for key, value in update_dict.items():
+        setattr(proj, key, value)
+
+    db.commit()
+    db.refresh(proj)
+    logger.info(f"User {user.username} updated project details for: {proj.id}")
+    return ProjectResponse(
+        id=str(proj.id),
+        title=proj.title,
+        description=proj.description,
+        target_duration=proj.target_duration,
+        aspect_ratio=proj.aspect_ratio,
+        style=proj.style,
+        caption_style=proj.caption_style,
+        music_id=str(proj.music_id) if proj.music_id else None,
+        last_output_path=proj.last_output_path,
+        created_at=proj.created_at,
     )
 
 @router.get("/{project_id}", response_model=ProjectDetailResponse)

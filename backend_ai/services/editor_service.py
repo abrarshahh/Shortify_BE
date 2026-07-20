@@ -300,8 +300,8 @@ class VideoEditor:
         temp_stabilized = None
 
         try:
-            pixabay_apply = os.getenv("PIXABAY_APPLY", "true").strip().lower() == "true"
-            if not pixabay_apply:
+            effects_enabled = os.getenv("EFFECTS_ENABLED", "true").strip().lower() == "true"
+            if not effects_enabled:
                 effect_path = None
 
             # Move stabilization here to process before slicing
@@ -1104,6 +1104,40 @@ class VideoEditor:
         """
         Renders the final video from an EDL produced by CreativeDirector.
         """
+        # --- NEW RENDER PLANNER COMPILATION ENGINE INTEGRATION ---
+        try:
+            from backend_ai.schemas.edl import EDLDocument, convert_edl_to_timeline_ir
+            from backend_ai.services.render_planner import RenderPlanner
+            from backend_ai.services.validation_resolver import ValidationConflictResolver
+            
+            logger.info("VideoEditor: Invoking new compile-render complex filter graph planner.")
+            edl_doc = EDLDocument.model_validate(edl)
+            timeline_ir = convert_edl_to_timeline_ir(edl_doc)
+            
+            # Resolve conflicts/boundaries first
+            resolver = ValidationConflictResolver()
+            resolver.resolve_conflicts(timeline_ir)
+            
+            # Compile to a single optimized command
+            planner = RenderPlanner(clips_dir=self.clips_dir, output_dir=self.output_dir)
+            cmd = planner.compile_timeline_to_ffmpeg_cmd(
+                timeline=timeline_ir,
+                output_filename=output_filename,
+                aspect_ratio=aspect_ratio,
+                clip_scores=clip_scores
+            )
+            
+            logger.info(f"VideoEditor: Executing compiled rendering command: {' '.join(cmd)}")
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True, stdin=subprocess.DEVNULL)
+            
+            output_path = os.path.join(self.output_dir, output_filename)
+            self._enforce_final_duration(output_path, float(timeline_ir.total_duration))
+            return output_path
+            
+        except Exception as e:
+            logger.warning(f"Compiled render engine failed, falling back to legacy procedural render: {e}")
+        # ---------------------------------------------------------
+
         self.skipped_clips = []
         try:
             validated_edl = validate_edl(edl, self.clips_dir)

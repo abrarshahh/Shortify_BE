@@ -170,19 +170,30 @@ def replace_project_audio(
 
 @router.get("", response_model=List[MediaResponse])
 def list_audio(
+    limit: int = 12,
+    offset: int = 0,
+    search: Optional[str] = None,
+    project_id: Optional[uuid.UUID] = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(lambda: SessionLocal())
 ):
-    audio = db.query(MediaAsset).filter(
+    query = db.query(MediaAsset).filter(
         MediaAsset.user_id == user.id, 
         MediaAsset.mime_type.startswith("audio/")
-    ).all()
+    )
+    if search:
+        query = query.filter(MediaAsset.original_filename.ilike(f"%{search}%"))
+        
+    audio = query.order_by(MediaAsset.uploaded_at.desc()).all()
     result = []
     for a in audio:
         # Find projects where this audio is set as music_id
         linked_projects = db.query(Project).filter(Project.music_id == a.id).all()
         p_ids = [str(p.id) for p in linked_projects]
         
+        if project_id and str(project_id) not in p_ids:
+            continue
+            
         result.append(MediaResponse(
             id=str(a.id),
             original_filename=a.original_filename,
@@ -197,7 +208,7 @@ def list_audio(
             uploaded_at=a.uploaded_at,
             project_ids=p_ids
         ))
-    return result
+    return result[offset : offset + limit]
 
 @router.delete("/project/{project_id}/{audio_id}")
 def remove_audio_from_project(

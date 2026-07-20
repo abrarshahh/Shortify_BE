@@ -1,3 +1,4 @@
+import os
 import json
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
@@ -63,6 +64,8 @@ class EDLClipDetails(BaseModel):
     effect_query: Optional[str] = ""
     sticker_query: Optional[str] = ""
     sticker_position: Optional[str] = "bottom-center"
+    effect_asset_id: Optional[str] = ""
+    sticker_asset_id: Optional[str] = ""
 
 
 class ColorGradeParams(BaseModel):
@@ -247,3 +250,287 @@ class EDLGenerationError(RuntimeError):
             "issues": self.issues,
         }
         return f"EDLGenerationError: {json.dumps(payload, ensure_ascii=True)}"
+
+
+# =====================================================================
+# Phase 10: Multi-Track Timeline & Editing IR Schemas
+# =====================================================================
+
+class VisualProperties(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    x: float = 0.0          # Normalized screen position x offset from center
+    y: float = 0.0          # Normalized screen position y offset from center
+    scale: float = 1.0      # Scale multiplier
+    rotation: float = 0.0   # Rotation in degrees
+    opacity: float = Field(1.0, ge=0.0, le=1.0)
+    anchor: str = "center"  # "center" | "top-left" | "top-right" | "bottom-left" | "bottom-right"
+    crop: Optional[Tuple[float, float, float, float]] = None # (x1, y1, x2, y2)
+    blur: float = 0.0       # Blur radius/strength
+
+class TimelineClip(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    source: str
+    start_in_clip: float = Field(ge=0.0)
+    end_in_clip: float = Field(ge=0.0)
+    timeline_start: float = Field(ge=0.0)
+    timeline_end: float = Field(ge=0.0)
+    layer: int = Field(1, ge=0, le=5)  # 0: Background, 1-2: Video/Main, 3: Overlay/B-roll, 4: Captions, 5: Stickers
+
+    speed: float = Field(1.0, gt=0.0)
+    reverse: bool = False
+    mute: bool = False
+    stabilize: bool = False
+    stabilize_strength: float = Field(0.5, ge=0.0, le=1.0)
+
+    transition_in: TransitionType = TransitionType.none
+    transition_in_duration: float = Field(0.0, ge=0.0)
+    transition_out: TransitionType = TransitionType.none
+    transition_out_duration: float = Field(0.0, ge=0.0)
+
+    color_grade: Optional[ColorGradeParams] = None
+    visual_properties: Optional[VisualProperties] = None
+
+    effect_asset_id: Optional[str] = ""
+    sticker_asset_id: Optional[str] = ""
+
+    # Keyframes representing list of (time_fraction, value)
+    scale_keyframes: Optional[List[Tuple[float, float]]] = None
+    opacity_keyframes: Optional[List[Tuple[float, float]]] = None
+
+    @model_validator(mode="after")
+    def validate_clip_timing(self):
+        if self.end_in_clip <= self.start_in_clip:
+            raise ValueError("end_in_clip must be greater than start_in_clip")
+        if self.timeline_end <= self.timeline_start:
+            raise ValueError("timeline_end must be greater than timeline_start")
+        return self
+
+class TimelineAudio(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    source: str
+    start_in_audio: float = Field(ge=0.0)
+    end_in_audio: float = Field(ge=0.0)
+    timeline_start: float = Field(ge=0.0)
+    timeline_end: float = Field(ge=0.0)
+
+    volume: float = Field(1.0, ge=0.0, le=2.0)
+    pitch: float = Field(1.0, ge=0.5, le=2.0)
+    speed: float = Field(1.0, gt=0.0)
+    fade_in: float = Field(0.0, ge=0.0)
+    fade_out: float = Field(0.0, ge=0.0)
+    loop: bool = False
+    ducking_enabled: bool = False
+    ducking_target_volume: float = Field(0.1, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_audio_timing(self):
+        if self.end_in_audio <= self.start_in_audio:
+            raise ValueError("end_in_audio must be greater than start_in_audio")
+        if self.timeline_end <= self.timeline_start:
+            raise ValueError("timeline_end must be greater than timeline_start")
+        return self
+
+class TimelineText(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    text: str
+    timeline_start: float = Field(ge=0.0)
+    timeline_end: float = Field(ge=0.0)
+    layer: int = Field(4, ge=0, le=5)
+
+    font: str = "Arial"
+    font_size: int = Field(40, ge=1)
+    weight: int = Field(700, ge=100, le=900)
+    italic: bool = False
+    underline: bool = False
+    color: str = "white"
+    opacity: float = Field(1.0, ge=0.0, le=1.0)
+
+    alignment: str = "center" # "center", "left", "right"
+    x: float = 0.0
+    y: float = 0.0
+
+    stroke_color: str = "black"
+    stroke_width: int = Field(2, ge=0)
+    shadow_color: str = "none"
+    shadow_width: int = Field(0, ge=0)
+    background_color: str = "none"
+
+    animation: str = "none" # "none", "fade", "slide_up", "slide_down", "slide_left", "slide_right"
+    animation_duration: float = Field(0.3, ge=0.0)
+
+    @model_validator(mode="after")
+    def validate_text_timing(self):
+        if self.timeline_end <= self.timeline_start:
+            raise ValueError("timeline_end must be greater than timeline_start")
+        return self
+
+class TimelineSticker(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    sticker_asset_id: str
+    timeline_start: float = Field(ge=0.0)
+    timeline_end: float = Field(ge=0.0)
+    layer: int = Field(5, ge=0, le=5)
+
+    x: float = 0.0
+    y: float = 0.0
+    scale: float = 1.0
+    rotation: float = 0.0
+    opacity: float = Field(1.0, ge=0.0, le=1.0)
+    animation: str = "none"
+
+    @model_validator(mode="after")
+    def validate_sticker_timing(self):
+        if self.timeline_end <= self.timeline_start:
+            raise ValueError("timeline_end must be greater than timeline_start")
+        return self
+
+class TimelineIR(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
+    storyline: str
+    total_duration: float = Field(gt=0.0)
+    
+    video_clips: List[TimelineClip] = Field(default_factory=list)
+    audio_clips: List[TimelineAudio] = Field(default_factory=list)
+    text_overlays: List[TimelineText] = Field(default_factory=list)
+    stickers: List[TimelineSticker] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_durations(self):
+        if not self.video_clips and not self.audio_clips:
+            raise ValueError("TimelineIR must contain at least one video_clip or audio_clip")
+        return self
+
+
+def convert_edl_to_timeline_ir(edl: EDLDocument) -> TimelineIR:
+    """Converts a legacy EDLDocument into the new TimelineIR format."""
+    video_clips = []
+    text_overlays = []
+    stickers = []
+    
+    for i, item in enumerate(edl.timeline):
+        clip_id = f"clip_{i}_{os.path.basename(item.clip_name).split('.')[0]}"
+        
+        # Parse transition duration mapping if set
+        t_in_dur = 0.0
+        if item.transition != TransitionType.none:
+            t_in_dur = 0.3 # Legacy fade/crossfade default
+            
+        clip = TimelineClip(
+            id=clip_id,
+            source=item.clip_name,
+            start_in_clip=item.start_in_clip,
+            end_in_clip=item.end_in_clip,
+            timeline_start=item.timeline_start,
+            timeline_end=item.timeline_end,
+            layer=1, # Legacy always maps to Layer 1 (Video)
+            speed=1.0,
+            reverse=item.reverse or False,
+            mute=False,
+            stabilize=item.stabilize or False,
+            stabilize_strength=item.stabilize_strength if item.stabilize_strength is not None else 0.5,
+            transition_in=item.transition,
+            transition_in_duration=t_in_dur,
+            transition_out=TransitionType.none,
+            transition_out_duration=0.0,
+            color_grade=item.color_grade,
+            visual_properties=None
+        )
+        
+        # Legacy speed multiplier parsing
+        if item.speed_preset == "constant_fast":
+            clip.speed = 2.0
+        elif item.speed_preset == "constant_slow":
+            clip.speed = 0.5
+        elif item.speed_preset in ("ramp_up", "ramp_down"):
+            clip.speed = 1.13
+        elif item.speed_preset == "speed_bump":
+            clip.speed = 1.2
+            
+        video_clips.append(clip)
+        
+        # Parse text overlay
+        if item.text_overlay:
+            text_id = f"text_{i}"
+            text_item = TimelineText(
+                id=text_id,
+                text=item.text_overlay,
+                timeline_start=item.timeline_start,
+                timeline_end=item.timeline_end,
+                layer=4, # Text layer
+                font="Arial",
+                font_size=40,
+                color="white"
+            )
+            # Map presets/animations
+            if item.text_preset:
+                if item.text_preset == "bold_hype":
+                    text_item.font_size = 52
+                    text_item.color = "yellow"
+                elif item.text_preset == "neon_glow":
+                    text_item.color = "cyan"
+            if item.text_animation:
+                text_item.animation = item.text_animation
+            text_overlays.append(text_item)
+            
+        # Parse stickers
+        # Legacy items set sticker_path if they resolved stickers
+        # Fall back to matching standard asset IDs
+        sticker_src = item.sticker_path or ""
+        if sticker_src:
+            sticker_id = f"sticker_{i}"
+            asset_id = "sticker_subscribe"
+            if "arrow" in sticker_src.lower():
+                asset_id = "sticker_arrow"
+            elif "fire" in sticker_src.lower():
+                asset_id = "sticker_fire"
+                
+            sticker_item = TimelineSticker(
+                id=sticker_id,
+                sticker_asset_id=asset_id,
+                timeline_start=item.timeline_start,
+                timeline_end=item.timeline_end,
+                layer=5, # Sticker layer
+                x=0.0,
+                y=0.0,
+                scale=1.0,
+                animation=item.sticker_animation or "none"
+            )
+            stickers.append(sticker_item)
+            
+    # Legacy background music mapping
+    audio_clips = []
+    if edl.music_start_offset is not None:
+        # Resolve background music
+        music_clip = TimelineAudio(
+            id="bg_music",
+            source="background_music", # dynamic mapping key
+            start_in_audio=edl.music_start_offset,
+            end_in_audio=edl.music_start_offset + edl.total_duration,
+            timeline_start=0.0,
+            timeline_end=edl.total_duration,
+            volume=0.22,
+            ducking_enabled=True,
+            ducking_target_volume=0.06
+        )
+        audio_clips.append(music_clip)
+        
+    return TimelineIR(
+        title=edl.title,
+        storyline=edl.storyline,
+        total_duration=edl.total_duration,
+        video_clips=video_clips,
+        audio_clips=audio_clips,
+        text_overlays=text_overlays,
+        stickers=stickers
+    )

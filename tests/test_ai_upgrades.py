@@ -834,7 +834,7 @@ def test_dynamic_stickers_and_effects(monkeypatch):
     
     editor = VideoEditor(clips_dir=".")
     
-    monkeypatch.setenv("PIXABAY_APPLY", "true")
+    monkeypatch.setenv("EFFECTS_ENABLED", "true")
     monkeypatch.setattr(editor, "_check_has_audio", lambda path: False)
     monkeypatch.setattr(VideoEditor, "_find_font", lambda self, *args, **kwargs: "fake_font.ttf")
     monkeypatch.setattr("os.path.exists", lambda path: True)

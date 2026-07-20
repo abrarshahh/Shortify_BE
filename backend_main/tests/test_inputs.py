@@ -98,3 +98,40 @@ def test_delete_project_cache():
     cache_root = os.path.dirname(user_cache_dir)
     if os.path.exists(cache_root) and not os.listdir(cache_root):
         os.rmdir(cache_root)
+
+def test_update_project():
+    # 1. Sign up a new user
+    unique_id = uuid.uuid4().hex[:8]
+    username = f"user_{unique_id}"
+    email = f"user_{unique_id}@example.com"
+    signup_res = client.post("/signup", json={"username": username, "email": email, "password": "testpass"})
+    assert signup_res.status_code == 200
+    session_id = signup_res.json()["session_id"]
+    headers = {"Authorization": f"Bearer {session_id}"}
+
+    # 2. Create a project
+    project_payload = {
+        "title": "Initial Title",
+        "description": "Initial description"
+    }
+    response = client.post("/projects", headers=headers, json=project_payload)
+    assert response.status_code == 201
+    proj = response.json()
+    project_id = proj["id"]
+
+    # 3. Patch the project details
+    update_payload = {
+        "title": "Updated Title",
+        "description": "Updated description",
+        "target_duration": 30,
+        "aspect_ratio": "16:9",
+        "style": "cinematic"
+    }
+    update_response = client.patch(f"/projects/{project_id}", headers=headers, json=update_payload)
+    assert update_response.status_code == 200
+    updated_proj = update_response.json()
+    assert updated_proj["title"] == "Updated Title"
+    assert updated_proj["description"] == "Updated description"
+    assert updated_proj["target_duration"] == 30
+    assert updated_proj["aspect_ratio"] == "16:9"
+    assert updated_proj["style"] == "cinematic"

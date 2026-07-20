@@ -260,7 +260,7 @@ class ColorGradingAgent:
         if lut_path:
             # Escape path for FFmpeg filter on Windows
             lut_path_escaped = lut_path.replace("\\", "/").replace(":", "\\:")
-            filter_chain = f"lut3d={lut_path_escaped}"
+            filter_chain = f"lut3d='{lut_path_escaped}'"
             logger.info(f"Detected custom LUT file -> {lut_path}")
         else:
             preset = self._get_preset(style)

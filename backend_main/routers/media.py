@@ -129,13 +129,23 @@ def link_media_to_project(
 
 @router.get("", response_model=List[MediaResponse])
 def list_media(
+    limit: int = 12,
+    offset: int = 0,
+    search: Optional[str] = None,
+    project_id: Optional[uuid.UUID] = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(lambda: SessionLocal())
 ):
-    media = db.query(MediaAsset).filter(
+    query = db.query(MediaAsset).filter(
         MediaAsset.user_id == user.id, 
         ~MediaAsset.mime_type.startswith("audio/")
-    ).all()
+    )
+    if search:
+        query = query.filter(MediaAsset.original_filename.ilike(f"%{search}%"))
+    if project_id:
+        query = query.join(ProjectMediaAsset).filter(ProjectMediaAsset.project_id == project_id)
+        
+    media = query.order_by(MediaAsset.uploaded_at.desc()).offset(offset).limit(limit).all()
     return [
         MediaResponse(
             id=str(m.id),

@@ -124,6 +124,14 @@ EDL_JSON_SCHEMA = {
                             "sticker_position": {
                                 "type": "string",
                                 "enum": ["center", "top-left", "top-right", "bottom-left", "bottom-right", "bottom-center"]
+                            },
+                            "effect_asset_id": {
+                                "type": "string",
+                                "enum": ["", "overlay_film_grain", "overlay_light_leak", "overlay_particles", "overlay_smoke"]
+                            },
+                            "sticker_asset_id": {
+                                "type": "string",
+                                "enum": ["", "sticker_subscribe", "sticker_arrow", "sticker_fire"]
                             }
                         },
                         "required": ["visual_cue", "sound_design", "pacing_style", "is_hook", "keep_original_audio"],
@@ -559,13 +567,14 @@ class CreativeDirector:
         Your goal is to create a high-retention Edit Decision List (EDL) for a TikTok/Reel that tells a compelling story.
         
         GOALS:
-        1. INFLUENCER MINDSET: The first 1.5 - 2 seconds MUST be a high-energy "hook".
+        1. INFLUENCER MINDSET: The first 1.5 - 2 seconds MUST be a high-energy "hook" (is_hook: true).
         2. STORYLINE: Create a clear, sequential narrative arc (e.g., Setup -> Conflict -> Resolution).
         3. DURATION: The total video duration MUST be approximately {target_duration} seconds.
-        4. STYLE: Follow the '{style}' style. 
-           - 'cinematic': slow fades, dramatic zooms.
-           - 'fast_cut': rapid transitions, high energy.
-           - 'travel': smooth slides, upbeat pacing.
+        4. STYLE: Strictly follow the '{style}' style rules and editing grammar:
+           - 'mrbeast': Ultra-high-intensity pacing. Snappy jump-cuts every 1.5s–2s. Uses zoom-ins/zooms on peak moments. Triggers SFX ('whoosh' / 'bass_drop') and stickers ('sticker_fire' / 'sticker_subscribe') for visual pop.
+           - 'ali_abdaal': Minimalistic and clean. Pacing is slow (3s–5s clips). Uses smooth crossfade transitions. Subtitles/text overlays should be classic_clean. Uses warm cinematic grading and subtle overlays ('overlay_film_grain').
+           - 'alex_hormozi': High-energy narrative. Snappy jump-cuts with bold neon_glow text overlays. High frequency of highlights, arrows ('sticker_arrow') pointing at elements, and sharp audio ducking.
+           - 'travel': Cinematic pacing. Uses smooth slide transitions ('slide_left'/'slide_right'). Warm, highly-saturated color grades, and warm light leaks ('overlay_light_leak') or ambient dust ('overlay_particles').
         
         OUTPUT FORMAT:
         You must return a raw JSON object with this structure:
@@ -611,8 +620,8 @@ class CreativeDirector:
                 "is_hook": boolean,
                 "keep_original_audio": boolean,
                 "effect_type": "none | particles | overlay_blend | light_leak | smoke",
-                "effect_query": "specific search query (decide dynamically based on user prompt/style, like 'lens flare', 'bokeh', 'smoke', 'fog', or empty string)",
-                "sticker_query": "specific search query for Giphy (decide dynamically based on user prompt/style, like 'subscribe', 'fire', 'arrow', or empty string)",
+                "effect_query": "legacy field (always set to empty string \"\")",
+                "sticker_query": "legacy field (always set to empty string \"\")",
                 "sticker_position": "center | top-left | top-right | bottom-left | bottom-right | bottom-center"
               }}
             }}
@@ -666,9 +675,9 @@ class CreativeDirector:
         - DYNAMIC ELEMENTS & STYLES SELECTION: You MUST select and tailor transitions, pacing_style, text_overlay, effect_type, effect_query, sticker_query, and sticker_position dynamically based on the user's prompt and intention. Do not use generic defaults if the prompt indicates a specific vibe (e.g. if they ask for a 'scary video', use 'smoke'/'fog' effects, 'ghost'/'scared' stickers, and glitch/dip_to_black transitions; if a 'hype/gym video', use 'particles'/'sparks' effects, 'fire'/'subscribe' stickers, and fast_cut/speed-ramp pacing).
         - TEXT OVERLAYS: You, as the viral video analyst, must decide which key moments or scene transitions would benefit from on-screen text overlays (title cards, main hooks, call-to-actions, or section headers) based on the user's prompt theme. For each timeline clip, determine if a short, punchy text overlay (1-4 words) fits the scene, and if so, write it in the 'text_overlay' field. Do not include subtitles of dialogue here (subtitles are processed separately). Use text overlays strategically to capture and keep viewer attention.
         - STICKERS & VISUAL EFFECTS: Determine if a clip would benefit from a visual effect loop or an animated transparent sticker based on the user's prompt and theme:
-          - If a sticker is useful (e.g. arrows to draw focus, subscribe button, expressions like 'fire', 'wow', 'laugh'), set 'sticker_query' to a 1-2 word query reflecting the user's prompt theme and pick its spatial 'sticker_position'.
-          - If a clip needs an aesthetic layer (like floating dust, sparks, light leaks, bokeh, fog, smoke), set 'effect_type' and provide a search term in 'effect_query' reflecting the user's prompt theme.
-          - Set 'effect_type' to 'none' and leave queries empty ("") if they are not needed for a clip.
+          - If a sticker is useful (e.g. arrows to draw focus, subscribe button, expressions like 'fire', 'wow'), select the most appropriate 'sticker_asset_id' from: 'sticker_subscribe' (for calls to action), 'sticker_arrow' (to highlight/point), or 'sticker_fire' (for high-energy/hype). If none matches, leave it empty (""). Set its spatial 'sticker_position' accordingly.
+          - If a clip needs an aesthetic layer, select the most appropriate 'effect_asset_id' from: 'overlay_film_grain' (for cinematic retro feel), 'overlay_light_leak' (for warm flares), 'overlay_particles' (for dust/sparks), or 'overlay_smoke' (for foggy/moody vibe). If none matches, leave it empty ("").
+          - Always set both 'sticker_query' and 'effect_query' to empty strings (""), and set 'effect_type' to 'none', as they are legacy fields replaced by local Asset IDs.
         - TRANSITIONS: Choose transitions deliberately based on style and narrative moment:
           - 'none' or 'jump_cut': default for fast_cut style, high energy sequences, beat-sync cuts. Never use crossfade on beat-sync cuts.
           - 'crossfade' or 'fade': smooth scene changes, travel style, when two clips share similar mood or color.

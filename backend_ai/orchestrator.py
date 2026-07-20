@@ -16,6 +16,7 @@ from backend_ai.agents.project_analyst_agent import ProjectAnalystAgent
 from backend_ai.services.relevance_service import RelevanceScorer
 from backend_ai.agents.thumbnail_agent import ThumbnailAgent
 from backend_ai.agents.clip_scoring_agent import ClipScoringAgent
+from backend_ai.agents.inspector_agent import EditingInspector
 from backend_ai.services.edl_validation_service import validate_edl
 from backend_ai.schemas.edl import EDLGenerationError, EDLValidationError
 from backend_ai.core.config_loader import AGENTS_CONFIG
@@ -77,6 +78,7 @@ class ShortifyOrchestrator:
         self.rhythm_agent = RhythmEngineer()
         self.media_agent = MediaAnalyst()
         self.director_agent = CreativeDirector()
+        self.inspector_agent = EditingInspector()
         
         self.color_grading_agent = ColorGradingAgent()
         self.analyst_agent = ProjectAnalystAgent()
@@ -240,6 +242,7 @@ class ShortifyOrchestrator:
         workflow.add_node("score_relevance", self.node_score_relevance)
         workflow.add_node("score_clips", self.node_score_clips)
         workflow.add_node("generate_edl", self.node_generate_edl)
+        workflow.add_node("review_timeline", self.node_review_timeline)
         workflow.add_node("render_video", self.node_render_video)
         workflow.add_node("color_grade", self.node_color_grade)
         workflow.add_node("review_safety", self.node_review_safety)
@@ -263,7 +266,15 @@ class ShortifyOrchestrator:
         workflow.add_edge("analyze_rhythm", "analyze_media")
         workflow.add_edge("analyze_media", "score_relevance")
         workflow.add_edge("score_relevance", "generate_edl")
-        workflow.add_edge("generate_edl", "render_video")
+        workflow.add_edge("generate_edl", "review_timeline")
+        workflow.add_conditional_edges(
+            "review_timeline",
+            self.route_after_review,
+            {
+                "pass": "render_video",
+                "fail": "generate_edl"
+            }
+        )
         workflow.add_edge("render_video", "color_grade")
         workflow.add_edge("color_grade", "review_safety")
         
@@ -467,6 +478,67 @@ class ShortifyOrchestrator:
 
                 continue
 
+    def node_review_timeline(self, state: AgentState) -> Dict:
+        logger.info("NODE: review_timeline")
+        callback = state.get("progress_callback")
+        if callback:
+            callback(72, "AI Editing Inspector review...")
+            
+        edl_dict = state["edl"]
+        prompt = state["project_title"]
+        
+        # Parse into legacy format and convert to TimelineIR dict for inspector
+        from backend_ai.schemas.edl import EDLDocument, convert_edl_to_timeline_ir
+        try:
+            edl_doc = EDLDocument.model_validate(edl_dict)
+            timeline_ir = convert_edl_to_timeline_ir(edl_doc).model_dump(mode="json")
+        except Exception as e:
+            logger.warning(f"Failed to convert EDL to TimelineIR for inspector review: {e}")
+            timeline_ir = edl_dict # fallback to passing edl dict
+            
+        # Review the timeline
+        review = self.inspector_agent.review_timeline(
+            user_prompt=prompt,
+            timeline_ir=timeline_ir
+        )
+        
+        verdict = review.get("verdict", "PASS")
+        feedback = review.get("feedback", "")
+        
+        logger.info(f"Inspector Verdict: {verdict}")
+        if feedback:
+            logger.info(f"Inspector Feedback: {feedback}")
+            
+        retry_count = state.get("retry_count", 0)
+        
+        # We reuse edl_feedback to communicate with the Planner (director_agent)
+        # We also store the inspector review in safe_zone_report so route can look it up
+        if verdict == "REVISE":
+            return {
+                "edl_feedback": f"Editing Inspector requested revision: {feedback}",
+                "retry_count": retry_count + 1,
+                "safe_zone_report": {"verdict": "WARN", "feedback": feedback}
+            }
+        else:
+            return {
+                "edl_feedback": "",
+                "safe_zone_report": {"verdict": "PASS"}
+            }
+
+    def route_after_review(self, state: AgentState) -> str:
+        report = state.get("safe_zone_report") or {}
+        verdict = report.get("verdict", "PASS")
+        retry_count = state.get("retry_count", 0)
+        
+        if verdict == "WARN" and retry_count < 3:
+            logger.warning(f"Routing back to generate_edl due to Inspector REVISE check (attempt {retry_count}/3)")
+            return "fail"
+            
+        if retry_count >= 3 and verdict == "WARN":
+            logger.warning("Maximum Inspector revisions (3) reached. Proceeding with current timeline draft.")
+            
+        return "pass"
+
     def node_render_video(self, state: AgentState) -> Dict:
         logger.info("NODE: render_video")
         callback = state.get("progress_callback")
@@ -501,7 +573,7 @@ class ShortifyOrchestrator:
             else:
                 dynamic_style = None
         
-        # Download dynamic stickers and visual effects overlays
+        # Resolve curated local stickers and visual effects overlays
         edl = state.get("edl", {})
         timeline = edl.get("timeline", [])
         
@@ -511,22 +583,46 @@ class ShortifyOrchestrator:
                 item["text_overlay"] = ""
                 
         add_stickers = state.get("add_stickers", True)
-        pixabay_apply = os.getenv("PIXABAY_APPLY", "true").strip().lower() == "true"
-        from backend_ai.utils.effect_downloader import download_giphy_sticker, download_pixabay_effect
+        from backend_ai.utils.asset_manager import resolve_asset_path
         
+        # Helper to map legacy keyword queries to standard asset IDs
+        def map_query_to_sticker_id(query: str) -> Optional[str]:
+            if not query:
+                return None
+            q = query.lower()
+            if "sub" in q or "bell" in q or "like" in q:
+                return "sticker_subscribe"
+            if "arrow" in q or "point" in q or "here" in q:
+                return "sticker_arrow"
+            if "fire" in q or "burn" in q or "hot" in q or "lit" in q:
+                return "sticker_fire"
+            return None
+
+        def map_query_to_effect_id(query: str, effect_type: str) -> Optional[str]:
+            if not query or effect_type == "none":
+                return None
+            q = query.lower()
+            if "grain" in q or "dust" in q or "scratch" in q:
+                return "overlay_film_grain"
+            if "light" in q or "leak" in q or "flare" in q:
+                return "overlay_light_leak"
+            if "particle" in q or "spark" in q or "fire" in q:
+                return "overlay_particles"
+            if "smoke" in q or "fog" in q or "mist" in q:
+                return "overlay_smoke"
+            return None
+
         for item in timeline:
             details = item.get("details", {})
-            sticker_query = details.get("sticker_query", "") if add_stickers else ""
-            effect_query = details.get("effect_query", "")
-            effect_type = details.get("effect_type", "none")
             
-            # Download Giphy sticker if query is set
+            # Check for new schema asset ID first, then fall back to legacy query mapping
+            sticker_id = details.get("sticker_asset_id") or map_query_to_sticker_id(details.get("sticker_query"))
+            effect_id = details.get("effect_asset_id") or map_query_to_effect_id(details.get("effect_query"), details.get("effect_type", "none"))
+            
             sticker_path = None
-            if sticker_query:
-                try:
-                    sticker_path = download_giphy_sticker(sticker_query)
-                except Exception as e:
-                    logger.warning(f"Failed to download sticker for query '{sticker_query}': {e}")
+            if add_stickers and sticker_id:
+                sticker_path = resolve_asset_path("stickers", sticker_id)
+                
             if sticker_path:
                 item["sticker_path"] = sticker_path
                 item["sticker_position"] = details.get("sticker_position", "bottom-center")
@@ -534,13 +630,10 @@ class ShortifyOrchestrator:
                 item.pop("sticker_path", None)
                 item.pop("sticker_position", None)
                 
-            # Download Pixabay overlay loop if query is set
             effect_path = None
-            if pixabay_apply and effect_type != "none" and effect_query:
-                try:
-                    effect_path = download_pixabay_effect(effect_query)
-                except Exception as e:
-                    logger.warning(f"Failed to download effect for query '{effect_query}': {e}")
+            if effect_id:
+                effect_path = resolve_asset_path("overlays", effect_id)
+                
             if effect_path:
                 item["effect_path"] = effect_path
             else:

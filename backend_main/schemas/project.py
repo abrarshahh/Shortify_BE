@@ -35,3 +35,11 @@ class ProjectListItem(BaseModel):
     last_output_path: Optional[str] = None
     created_at: Optional[datetime]
     render_status: str  # not_started | running | done | error
+
+class ProjectUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    target_duration: Optional[int] = None
+    aspect_ratio: Optional[str] = None
+    style: Optional[str] = None
+    caption_style: Optional[str] = None
