@@ -2,7 +2,7 @@ import os, shutil, uuid
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from backend_main.config import SessionLocal, logger, STORAGE_ROOT
+from backend_main.config import SessionLocal, logger, STORAGE_ROOT, get_db
 from backend_main.models import Project, User, MediaAsset, ProjectMediaAsset
 from backend_main.auth import get_current_user
 from backend_main.schemas import ProjectCreate, ProjectResponse, ProjectDetailResponse, MediaResponse, ProjectListItem, ProjectUpdate
@@ -18,7 +18,7 @@ def list_all_projects(
     search: Optional[str] = None,
     status: Optional[str] = None,
     user: User = Depends(get_current_user),
-    db: Session = Depends(lambda: SessionLocal()),
+    db: Session = Depends(get_db),
 ):
     """
     Returns all projects belonging to the authenticated user,
@@ -68,7 +68,7 @@ def list_all_projects(
 def create_project(
     project_data: ProjectCreate,
     user: User = Depends(get_current_user),
-    db: Session = Depends(lambda: SessionLocal())
+    db: Session = Depends(get_db)
 ):
     proj = Project(
         user_id=user.id,
@@ -97,7 +97,7 @@ def update_project(
     project_id: uuid.UUID,
     project_data: ProjectUpdate,
     user: User = Depends(get_current_user),
-    db: Session = Depends(lambda: SessionLocal())
+    db: Session = Depends(get_db)
 ):
     proj = db.query(Project).filter(Project.id == project_id, Project.user_id == user.id).first()
     if not proj:
@@ -127,7 +127,7 @@ def update_project(
 def get_project_details(
     project_id: uuid.UUID,
     user: User = Depends(get_current_user),
-    db: Session = Depends(lambda: SessionLocal())
+    db: Session = Depends(get_db)
 ):
     project = db.query(Project).filter(Project.id == project_id, Project.user_id == user.id).first()
     if not project:
@@ -169,7 +169,7 @@ def get_project_details(
 def delete_project_soft(
     project_id: uuid.UUID,
     user: User = Depends(get_current_user),
-    db: Session = Depends(lambda: SessionLocal())
+    db: Session = Depends(get_db)
 ):
     """Deletes project and its relations, but keeps media files and output."""
     project = db.query(Project).filter(Project.id == project_id, Project.user_id == user.id).first()
@@ -185,7 +185,7 @@ def delete_project_soft(
 def delete_project_hard(
     project_id: uuid.UUID,
     user: User = Depends(get_current_user),
-    db: Session = Depends(lambda: SessionLocal())
+    db: Session = Depends(get_db)
 ):
     """Deletes project, its relations, and all associated media/audio files."""
     project = db.query(Project).filter(Project.id == project_id, Project.user_id == user.id).first()
@@ -232,7 +232,7 @@ def delete_project_hard(
 def delete_project_cache(
     project_id: uuid.UUID,
     user: User = Depends(get_current_user),
-    db: Session = Depends(lambda: SessionLocal())
+    db: Session = Depends(get_db)
 ):
     """
     Deletes all cached analyses (clip_scores, media_analysis, music_analysis, director_analysis, metadata)

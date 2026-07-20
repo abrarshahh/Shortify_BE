@@ -2,7 +2,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from backend_main.config import SessionLocal, logger, STORAGE_ROOT
+from backend_main.config import SessionLocal, logger, STORAGE_ROOT, get_db
 from backend_main.models import Project, MediaAsset, User, ProjectMediaAsset
 from backend_main.auth import get_current_user
 from backend_main.schemas import MediaResponse, UploadResponse, MediaLinkRequest
@@ -35,7 +35,7 @@ def _media_asset_fields(full_path) -> dict:
 def upload_media_to_library(
     files: List[UploadFile] = File(...),
     user: User = Depends(get_current_user),
-    db: Session = Depends(lambda: SessionLocal())
+    db: Session = Depends(get_db)
 ):
     saved = []
     for upload in files:
@@ -67,7 +67,7 @@ def upload_media_to_project(
     project_id: uuid.UUID,
     files: List[UploadFile] = File(...),
     user: User = Depends(get_current_user),
-    db: Session = Depends(lambda: SessionLocal())
+    db: Session = Depends(get_db)
 ):
     project = db.query(Project).filter(Project.id == project_id, Project.user_id == user.id).first()
     if not project:
@@ -105,7 +105,7 @@ def link_media_to_project(
     project_id: uuid.UUID,
     request_data: MediaLinkRequest,
     user: User = Depends(get_current_user),
-    db: Session = Depends(lambda: SessionLocal())
+    db: Session = Depends(get_db)
 ):
     project = db.query(Project).filter(Project.id == project_id, Project.user_id == user.id).first()
     if not project:
@@ -134,7 +134,7 @@ def list_media(
     search: Optional[str] = None,
     project_id: Optional[uuid.UUID] = None,
     user: User = Depends(get_current_user),
-    db: Session = Depends(lambda: SessionLocal())
+    db: Session = Depends(get_db)
 ):
     query = db.query(MediaAsset).filter(
         MediaAsset.user_id == user.id, 
@@ -168,7 +168,7 @@ def remove_media_from_project(
     project_id: uuid.UUID,
     media_id: uuid.UUID,
     user: User = Depends(get_current_user),
-    db: Session = Depends(lambda: SessionLocal())
+    db: Session = Depends(get_db)
 ):
     # Check project ownership
     project = db.query(Project).filter(Project.id == project_id, Project.user_id == user.id).first()
@@ -192,7 +192,7 @@ def replace_project_media(
     old_media_id: uuid.UUID,
     new_media_id: uuid.UUID,
     user: User = Depends(get_current_user),
-    db: Session = Depends(lambda: SessionLocal())
+    db: Session = Depends(get_db)
 ):
     project = db.query(Project).filter(Project.id == project_id, Project.user_id == user.id).first()
     if not project:
@@ -228,7 +228,7 @@ def replace_project_media(
 def delete_media_entirely(
     media_id: uuid.UUID,
     user: User = Depends(get_current_user),
-    db: Session = Depends(lambda: SessionLocal())
+    db: Session = Depends(get_db)
 ):
     asset = db.query(MediaAsset).filter(MediaAsset.id == media_id, MediaAsset.user_id == user.id).first()
     if not asset:

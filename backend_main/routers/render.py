@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
 
-from backend_main.config import SessionLocal, STORAGE_ROOT, logger
+from backend_main.config import SessionLocal, STORAGE_ROOT, logger, get_db
 from backend_main.models import Project, MediaAsset, User, ProjectMediaAsset
 from backend_main.auth import get_current_user
 from backend_main.schemas import OutputVideoResponse, RenderResponse, RenderRequest
@@ -24,7 +24,7 @@ def trigger_render(
     body: RenderRequest,
     background_tasks: BackgroundTasks,
     user: User = Depends(get_current_user),
-    db: Session = Depends(lambda: SessionLocal()),
+    db: Session = Depends(get_db),
 ):
     """
     Triggers the full Shortify AI pipeline for a project.
@@ -124,7 +124,7 @@ def trigger_render(
 def get_render_status(
     project_id: uuid.UUID,
     user: User = Depends(get_current_user),
-    db: Session = Depends(lambda: SessionLocal()),
+    db: Session = Depends(get_db),
 ):
     project = db.query(Project).filter(Project.id == project_id).first()
     if not project:
@@ -175,7 +175,7 @@ def get_render_status(
 def cancel_render(
     project_id: uuid.UUID,
     user: User = Depends(get_current_user),
-    db: Session = Depends(lambda: SessionLocal()),
+    db: Session = Depends(get_db),
 ):
     """
     Cancels a running or queued render job for the project.
@@ -203,7 +203,7 @@ def cancel_render(
 @router.get("/outputs", response_model=List[OutputVideoResponse])
 def list_output_videos(
     user: User = Depends(get_current_user),
-    db: Session = Depends(lambda: SessionLocal())
+    db: Session = Depends(get_db)
 ):
     projects = db.query(Project).filter(Project.user_id == user.id, Project.last_output_path != None).all()
     outputs = []
@@ -218,7 +218,7 @@ def list_output_videos(
 def download_project_video(
     project_id: uuid.UUID,
     user: User = Depends(get_current_user),
-    db: Session = Depends(lambda: SessionLocal())
+    db: Session = Depends(get_db)
 ):
     """
     Downloads the final rendered video (.mp4) for the authenticated user.
@@ -245,7 +245,7 @@ def download_project_video(
 def get_project_thumbnail(
     project_id: uuid.UUID,
     user: User = Depends(get_current_user),
-    db: Session = Depends(lambda: SessionLocal())
+    db: Session = Depends(get_db)
 ):
     """
     Retrieves the generated cover thumbnail image (.jpg) for the project.
