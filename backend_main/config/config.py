@@ -7,9 +7,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ---------- CONFIG ----------
-database_url=os.getenv("DATABASE_URL")
-
-
+database_url = os.getenv("DATABASE_URL")
+if database_url and database_url.startswith("postgres://"):
+    database_url = database_url.replace("postgres://", "postgresql://", 1)
 
 DATABASE_URL = database_url
 SECRET_KEY = os.getenv("SECRET_KEY")

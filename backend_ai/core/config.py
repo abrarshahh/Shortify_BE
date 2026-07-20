@@ -14,5 +14,16 @@ VIDEO_EDITOR_PACING_SPEEDS = {
 }
 
 # FFMPEG settings
+import os
+import shutil
+
 COLOR_GRADING_ENABLED = True
-FFMPEG_PATH = "ffmpeg"
+
+# Detect local static ffmpeg binaries for production PaaS environments (like Render free tier)
+_local_bin = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "bin"))
+_local_ffmpeg = os.path.join(_local_bin, "ffmpeg")
+
+if os.path.exists(_local_ffmpeg):
+    FFMPEG_PATH = _local_ffmpeg
+else:
+    FFMPEG_PATH = shutil.which("ffmpeg") or "ffmpeg"
