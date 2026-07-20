@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from backend_main.config import SessionLocal, logger, STORAGE_ROOT, get_db
-from backend_main.models import Project, User, MediaAsset, ProjectMediaAsset
+from backend_main.models import Project, User, MediaAsset, ProjectMediaAsset, ReelJob
 from backend_main.auth import get_current_user
 from backend_main.schemas import ProjectCreate, ProjectResponse, ProjectDetailResponse, MediaResponse, ProjectListItem, ProjectUpdate
 from backend_main import worker_service
@@ -176,6 +176,7 @@ def delete_project_soft(
     if not project:
         raise HTTPException(404, "Project not found")
         
+    db.query(ReelJob).filter(ReelJob.project_id == project_id).delete()
     db.query(ProjectMediaAsset).filter(ProjectMediaAsset.project_id == project_id).delete()
     db.delete(project)
     db.commit()
@@ -195,7 +196,8 @@ def delete_project_hard(
     # 1. Get all linked assets before removing links
     assets = list(project.media_assets)
     
-    # 2. Remove all links for this project
+    # 2. Remove all links and reels for this project
+    db.query(ReelJob).filter(ReelJob.project_id == project_id).delete()
     db.query(ProjectMediaAsset).filter(ProjectMediaAsset.project_id == project_id).delete()
     
     # 3. For each asset, check if it's orphaned (not used by any other project)

@@ -45,6 +45,7 @@ def trigger_render(
     )
 
     if not media_assets:
+        logger.warning(f"[Render API] Project {project_id} has no media assets linked in the database.")
         raise HTTPException(400, "No video media found for this project.")
 
     video_paths = [
@@ -54,6 +55,11 @@ def trigger_render(
     ]
 
     if not video_paths:
+        logger.warning(
+            f"[Render API] Project {project_id} has linked media assets in DB, "
+            f"but no corresponding physical files found in storage. "
+            f"Paths checked: {[str(STORAGE_ROOT / asset.storage_path) for asset in media_assets]}"
+        )
         raise HTTPException(400, "Video files not found on disk.")
 
     music_path = None
