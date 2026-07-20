@@ -177,7 +177,7 @@ def delete_project_soft(
         raise HTTPException(404, "Project not found")
         
     db.query(ReelJob).filter(ReelJob.project_id == project_id).delete()
-    db.query(ProjectMediaAsset).filter(ProjectMediaAsset.project_id == project_id).delete()
+    project.media_assets.clear()
     db.delete(project)
     db.commit()
     return {"message": "Project deleted (files preserved)"}
@@ -196,9 +196,10 @@ def delete_project_hard(
     # 1. Get all linked assets before removing links
     assets = list(project.media_assets)
     
-    # 2. Remove all links and reels for this project
+    # 2. Remove all links and reels for this project (using ORM clearance + flush)
     db.query(ReelJob).filter(ReelJob.project_id == project_id).delete()
-    db.query(ProjectMediaAsset).filter(ProjectMediaAsset.project_id == project_id).delete()
+    project.media_assets.clear()
+    db.flush()
     
     # 3. For each asset, check if it's orphaned (not used by any other project)
     for asset in assets:
