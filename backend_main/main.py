@@ -1,5 +1,5 @@
 import logging
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -25,9 +25,10 @@ app.add_middleware(
 )
 
 @app.get("/storage/{file_path:path}")
-def get_storage_file(file_path: str):
+async def get_storage_file(file_path: str, request: Request):
     import os
-    from fastapi.responses import FileResponse, RedirectResponse
+    import httpx
+    from fastapi.responses import FileResponse, StreamingResponse
     from fastapi import HTTPException
     
     local_file = os.path.join("storage", file_path)
@@ -36,12 +37,58 @@ def get_storage_file(file_path: str):
     if os.path.exists(local_file) and os.path.isfile(local_file):
         return FileResponse(local_file)
         
-    # 2. Otherwise, if Supabase is configured, redirect to the permanent copy
+    # 2. Otherwise, proxy the file stream from Supabase (avoids CORS redirect blocks)
     supabase_url = os.getenv("SUPABASE_URL")
     supabase_bucket = os.getenv("SUPABASE_BUCKET", "shortify")
     if supabase_url:
         public_url = f"{supabase_url}/storage/v1/object/public/{supabase_bucket}/{file_path}"
-        return RedirectResponse(url=public_url)
+        
+        # Forward range headers to Supabase to support HTML5 video player scrubbing/seeking
+        headers = {}
+        range_header = request.headers.get("range")
+        if range_header:
+            headers["range"] = range_header
+            
+        async def stream_chunks():
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                async with client.stream("GET", public_url, headers=headers) as r:
+                    if r.status_code >= 400:
+                        raise HTTPException(status_code=r.status_code, detail="Failed to fetch file from storage")
+                    async for chunk in r.iter_bytes():
+                        yield chunk
+                        
+        # Fetch the metadata/headers from the resource using a quick HEAD request
+        try:
+            async with httpx.AsyncClient() as client:
+                head_resp = await client.head(public_url, headers=headers)
+                content_type = head_resp.headers.get("content-type", "application/octet-stream")
+                content_length = head_resp.headers.get("content-length")
+                accept_ranges = head_resp.headers.get("accept-ranges")
+                content_range = head_resp.headers.get("content-range")
+                status_code = head_resp.status_code
+        except Exception as e:
+            logger.error(f"[Storage Proxy] Failed to HEAD public URL {public_url}: {e}")
+            content_type = "application/octet-stream"
+            content_length = None
+            accept_ranges = "bytes"
+            content_range = None
+            status_code = 200
+            
+        resp_headers = {
+            "Content-Type": content_type,
+        }
+        if content_length:
+            resp_headers["Content-Length"] = content_length
+        if accept_ranges:
+            resp_headers["Accept-Ranges"] = accept_ranges
+        if content_range:
+            resp_headers["Content-Range"] = content_range
+            
+        return StreamingResponse(
+            stream_chunks(),
+            status_code=status_code,
+            headers=resp_headers
+        )
         
     # 3. Fallback
     raise HTTPException(status_code=404, detail="File not found")
