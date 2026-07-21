@@ -24,6 +24,7 @@ def upload_to_supabase(local_path: str, storage_path: str, mime_type: str = "app
 
     url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{storage_path}"
     headers = {
+        "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": mime_type,
         "x-upsert": "true"

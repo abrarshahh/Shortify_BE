@@ -275,6 +275,40 @@ def _execute_render_task(
                 db.commit()
         finally:
             db.close()
+            
+        # Clean up local disk files to prevent Render container from running out of disk space
+        import shutil
+        try:
+            # 1. Delete export directory
+            export_dir = os.path.join(STORAGE_ROOT, "exports", project_id)
+            if os.path.exists(export_dir):
+                shutil.rmtree(export_dir, ignore_errors=True)
+                logger.info(f"[Worker Cleanup] Deleted local export directory: {export_dir}")
+                
+            # 2. Delete cache directory
+            project_cache_dir = os.path.join("cache", user_folder, project_id)
+            if os.path.exists(project_cache_dir):
+                shutil.rmtree(project_cache_dir, ignore_errors=True)
+                logger.info(f"[Worker Cleanup] Deleted local cache directory: {project_cache_dir}")
+                
+            # 3. Delete downloaded source videos/audios used in this run
+            for path in video_paths:
+                if os.path.exists(path):
+                    try:
+                        os.unlink(path)
+                        logger.info(f"[Worker Cleanup] Deleted local source video: {path}")
+                    except Exception as unlink_err:
+                        logger.warning(f"[Worker Cleanup] Failed to delete source video {path}: {unlink_err}")
+            
+            if music_path and os.path.exists(music_path):
+                try:
+                    os.unlink(music_path)
+                    logger.info(f"[Worker Cleanup] Deleted local music file: {music_path}")
+                except Exception as unlink_err:
+                    logger.warning(f"[Worker Cleanup] Failed to delete music file {music_path}: {unlink_err}")
+                    
+        except Exception as cleanup_err:
+            logger.error(f"[Worker Cleanup] Error running cleanup: {cleanup_err}")
 
 def cancel_job(project_id: str) -> bool:
     """
