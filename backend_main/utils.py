@@ -60,8 +60,9 @@ def save_upload_file(user_id: str, upload_file: UploadFile) -> str:
     full_dir.mkdir(parents=True, exist_ok=True)
     
     is_video = ext in {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+    use_supabase = os.getenv("USE_SUPABASE", "false").strip().lower() == "true"
     
-    if is_video:
+    if is_video and use_supabase:
         target_filename = f"{media_id}.mp4"
         raw_filename = f"raw_{media_id}{ext}"
         

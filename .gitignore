@@ -125,6 +125,8 @@ storage/
 # data
 architectural_answers.md
 plan.md
+oracle_deployment.md
+
 data/
 testing_data/
 

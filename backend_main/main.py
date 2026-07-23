@@ -40,7 +40,8 @@ async def get_storage_file(file_path: str, request: Request):
     # 2. Otherwise, proxy the file stream from Supabase (avoids CORS redirect blocks)
     supabase_url = os.getenv("SUPABASE_URL")
     supabase_bucket = os.getenv("SUPABASE_BUCKET", "shortify")
-    if supabase_url:
+    use_supabase = os.getenv("USE_SUPABASE", "false").strip().lower() == "true"
+    if use_supabase and supabase_url:
         public_url = f"{supabase_url}/storage/v1/object/public/{supabase_bucket}/{file_path}"
         
         # Forward range headers to Supabase to support HTML5 video player scrubbing/seeking

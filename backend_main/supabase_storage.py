@@ -9,7 +9,8 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "shortify")
 
 def is_supabase_configured() -> bool:
-    return bool(SUPABASE_URL and SUPABASE_KEY)
+    use_supabase = os.getenv("USE_SUPABASE", "false").strip().lower() == "true"
+    return use_supabase and bool(SUPABASE_URL and SUPABASE_KEY)
 
 def upload_to_supabase(local_path: str, storage_path: str, mime_type: str = "application/octet-stream") -> bool:
     """

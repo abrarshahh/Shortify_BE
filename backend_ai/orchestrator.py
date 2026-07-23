@@ -41,6 +41,7 @@ class AgentState(TypedDict):
     add_subtitle: bool
     add_stickers: bool
     add_textoverlay: bool
+    audio_ducking: bool
     
     # Internal data passed between nodes
     rhythm_data: Dict[str, Any]
@@ -647,7 +648,8 @@ class ShortifyOrchestrator:
             aspect_ratio=state.get("aspect_ratio", "9:16"),
             rhythm_data=state.get("rhythm_data", {}),
             clip_scores=state.get("clip_scores"),
-            dynamic_style=dynamic_style
+            dynamic_style=dynamic_style,
+            audio_ducking=state.get("audio_ducking", True),
         )
         
         return {

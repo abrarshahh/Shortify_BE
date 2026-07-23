@@ -281,6 +281,7 @@ class VideoEditor:
         sticker_position: Optional[str] = "bottom-center",
         effect_path: Optional[str] = None,
         color_grade: Optional[Dict[str, Any]] = None,
+        clip_effect: Optional[Dict[str, Any]] = None,
         speed_preset: Optional[str] = None,
         speed_keyframes: Optional[List[Tuple[float, float]]] = None,
         reverse: bool = False,
@@ -470,6 +471,37 @@ class VideoEditor:
                 else:
                     params = color_grade
                 color_filter_str = build_ffmpeg_color_filter(params)
+
+            clip_effect_str = ""
+            if clip_effect and clip_effect.get("effect_type") and clip_effect.get("effect_type") != "none":
+                eff_type = clip_effect.get("effect_type")
+                params = clip_effect.get("parameters") or {}
+                if eff_type == "blur":
+                    max_blur_size = int(params.get("max_blur_size", 51))
+                    if max_blur_size % 2 == 0:
+                        max_blur_size = max(1, max_blur_size - 1)
+                    radius = max(1, max_blur_size // 4)
+                    clip_effect_str = f"boxblur=lr={radius}:lp=2"
+                elif eff_type == "pixelate":
+                    cell_size = int(params.get("max_cell_size", 32))
+                    if cell_size <= 1:
+                        cell_size = 32
+                    clip_effect_str = f"scale=iw/{cell_size}:ih/{cell_size},scale={target_w}:{target_h}:flags=neighbor"
+                elif eff_type == "vignette":
+                    vignette_strength = float(params.get("vignette_strength", 0.5))
+                    import math
+                    angle = vignette_strength * (math.pi / 4.0)
+                    clip_effect_str = f"vignette=angle={angle:.4f}"
+                elif eff_type == "mirror":
+                    direction = str(params.get("direction", "horizontal")).lower()
+                    if direction == "vertical":
+                        clip_effect_str = "vflip"
+                    else:
+                        clip_effect_str = "hflip"
+                elif eff_type == "glitch":
+                    clip_effect_str = "noise=alls=20:allf=t+u"
+                elif eff_type == "light_leak":
+                    clip_effect_str = "eq=brightness=0.1:contrast=1.1"
                 
             for idx, (s, e) in enumerate(intervals):
                 v_name = f"v{idx}"
@@ -499,6 +531,8 @@ class VideoEditor:
                     
                 if color_filter_str:
                     v_filters.append(color_filter_str)
+                if clip_effect_str:
+                    v_filters.append(clip_effect_str)
 
                 filter_complex_parts.append(
                     f"[0:v]{','.join(v_filters)}[{v_name}]"
@@ -1099,7 +1133,8 @@ class VideoEditor:
         aspect_ratio: str = "9:16",
         rhythm_data: Optional[Dict[str, Any]] = None,
         clip_scores: Optional[Dict[str, Any]] = None,
-        dynamic_style: Optional[Dict[str, Any]] = None
+        dynamic_style: Optional[Dict[str, Any]] = None,
+        audio_ducking: bool = True
     ) -> str:
         """
         Renders the final video from an EDL produced by CreativeDirector.
@@ -1124,7 +1159,9 @@ class VideoEditor:
                 timeline=timeline_ir,
                 output_filename=output_filename,
                 aspect_ratio=aspect_ratio,
-                clip_scores=clip_scores
+                clip_scores=clip_scores,
+                audio_ducking=audio_ducking,
+                music_path=music_path
             )
             
             logger.info(f"VideoEditor: Executing compiled rendering command: {' '.join(cmd)}")
@@ -1249,12 +1286,12 @@ class VideoEditor:
                     if clip_scores and source_filename in clip_scores:
                         face_anchor_x = clip_scores[source_filename].get("face_anchor_x", 0.5)
 
-                    keep_aud = details.get("keep_original_audio", True)
+                    keep_aud = False if audio_ducking else details.get("keep_original_audio", True)
                     has_aud = (not is_image) and self._check_has_audio(clip_path) and keep_aud
 
-                    audio_ducking = item.get("audio_ducking") or {}
-                    orig_audio_vol = audio_ducking.get("original_audio_volume")
-                    music_vol = audio_ducking.get("music_volume_during_segment")
+                    ducking_params = item.get("audio_ducking") or {}
+                    orig_audio_vol = 0.0 if audio_ducking else ducking_params.get("original_audio_volume")
+                    music_vol = self.MUSIC_VOLUME if audio_ducking else ducking_params.get("music_volume_during_segment")
 
                     processed_dur = self._process_single_clip(
                         clip_path=clip_path,
@@ -1273,7 +1310,8 @@ class VideoEditor:
                         sticker_path=item.get("sticker_path"),
                         sticker_position=item.get("sticker_position", "bottom-center"),
                         effect_path=item.get("effect_path"),
-                        color_grade=item.get("color_grade"),
+                        color_grade=item.get("color_grade") or edl.get("global_color_grade"),
+                        clip_effect=item.get("clip_effect"),
                         speed_preset=item.get("speed_preset"),
                         speed_keyframes=item.get("speed_keyframes"),
                         reverse=item.get("reverse", False),

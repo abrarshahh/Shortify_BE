@@ -22,6 +22,22 @@ EDL_JSON_SCHEMA = {
         "storyline": {"type": "string"},
         "total_duration": {"type": "number", "minimum": 0.1},
         "music_start_offset": {"type": "number", "minimum": 0.0},
+        "global_color_grade": {
+            "type": "object",
+            "properties": {
+                "brightness": {"type": "number", "minimum": 0.5, "maximum": 1.8},
+                "contrast": {"type": "number", "minimum": 0.5, "maximum": 2.0},
+                "gamma": {"type": "number", "minimum": 0.1, "maximum": 10.0},
+                "saturation": {"type": "number", "minimum": 0.0, "maximum": 2.0},
+                "vibrance": {"type": "number", "minimum": 0.0, "maximum": 2.0},
+                "hue": {"type": "number", "minimum": -180.0, "maximum": 180.0},
+                "temperature": {"type": "number", "minimum": -50.0, "maximum": 50.0},
+                "vignette_strength": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                "vignette_radius": {"type": "number", "minimum": 0.0, "maximum": 2.0}
+            },
+            "required": ["brightness", "contrast", "gamma", "saturation", "vibrance", "hue", "temperature", "vignette_strength", "vignette_radius"],
+            "additionalProperties": False
+        },
         "timeline": {
             "type": "array",
             "minItems": 1,
@@ -104,6 +120,21 @@ EDL_JSON_SCHEMA = {
                         "enum": ["none", "fade", "slide_up", "slide_down", "slide_left", "slide_right"]
                     },
                     "text_overlay": {"type": "string"},
+                    "clip_effect": {
+                        "type": "object",
+                        "properties": {
+                            "effect_type": {
+                                "type": "string",
+                                "enum": ["none", "blur", "pixelate", "vignette", "glitch", "mirror"]
+                            },
+                            "parameters": {
+                                "type": "object",
+                                "additionalProperties": True
+                            }
+                        },
+                        "required": ["effect_type"],
+                        "additionalProperties": False
+                    },
                     "details": {
                         "type": "object",
                         "properties": {
@@ -140,7 +171,7 @@ EDL_JSON_SCHEMA = {
                 },
                 "required": [
                     "clip_name", "start_in_clip", "end_in_clip",
-                    "timeline_start", "timeline_end", "transition", "text_overlay", "color_grade", "details"
+                    "timeline_start", "timeline_end", "transition", "text_overlay", "details"
                 ],
                 "additionalProperties": False
             }
@@ -698,7 +729,7 @@ class CreativeDirector:
             - light_leak: `{{"color": "white | orange | red | blue", "intensity": float}}`
             - spin: `{{"angle_delta": float, "zoom_scale": float}}`
             - ripple: `{{"wave_frequency": float, "wave_amplitude": float}}`
-        - COLOR GRADING: You MUST define the `color_grade` object for every timeline item, acting as a professional editor. Reason over each clip's `avg_brightness` (exposure score), `face_detected`, and the overall project style/vibe to set optimal parameters:
+        - COLOR GRADING (GLOBAL & LOCAL): You can define a global color grade aesthetic at the root level using `global_color_grade`. If you want a specific clip to have its own color correction/grading override, define the `color_grade` object inside that timeline item. Otherwise, leave it out to inherit the global grading. Reason over each clip's `avg_brightness` (exposure score), `face_detected`, and the overall project style/vibe to set optimal parameters:
           - Brightness & Exposure Correction:
             - If `avg_brightness` is low (e.g. < 90), the clip is dark/underexposed: you MUST boost `brightness` (1.1 to 1.3), increase `contrast` (1.1 to 1.25), and lift `gamma` (1.05 to 1.3) to recover shadow detail.
             - If `avg_brightness` is high (e.g. > 165), the clip is bright/overexposed: you MUST reduce `brightness` (0.85 to 0.95) and decrease `gamma` (0.8 to 0.95) to preserve highlight details.
@@ -710,6 +741,7 @@ class CreativeDirector:
           - Face Preservation: If `face_detected` is true, avoid extreme temperature/hue shifts that make skin look unnatural. Prefer boosting `vibrance` instead of raw `saturation` to preserve skin realism.
           - Aesthetic Continuity: Ensure that sequential clips of the same setting share similar or smoothly transitioning grading settings for continuity.
           - Allowed ranges: brightness (0.5 to 1.8), contrast (0.5 to 2.0), gamma (0.1 to 10.0), saturation (0.0 to 2.0), vibrance (0.0 to 2.0), hue (-180.0 to 180.0), temperature (-50.0 to 50.0), vignette_strength (0.0 to 1.0), vignette_radius (0.0 to 2.0). All fields must be explicitly populated.
+        - CLIP EFFECTS: You can dynamically apply visual filters to individual clips by defining `"clip_effect"`. Specify `"effect_type"` (one of: `none`, `blur`, `pixelate`, `vignette`, `glitch`, `mirror`) and a `"parameters"` object to control it (e.g. `max_blur_size` for blur, `cell_size` for pixelate, `intensity` for glitch).
         - SPEED RAMPING & MOTION: You can alter the time mapping of a clip.
           - Option A: Set `"speed_preset"` to one of:
             - `"constant_fast"` (flat 2.0x speed)

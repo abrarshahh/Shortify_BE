@@ -7,23 +7,93 @@ from sqlalchemy import text
 
 import os
 import shutil
+from dotenv import load_dotenv
 
-# Clean temporary storage, data, and cache directories
-dirs_to_delete = [
-    "cache",
-    "storage",
-    "data",
-    ".pytest_cache",
-]
+load_dotenv()
 
-print("Cleaning storage, data, and cache directories...")
-for d in dirs_to_delete:
-    if os.path.exists(d):
-        try:
-            shutil.rmtree(d)
-            print(f"  Deleted directory: {d}")
-        except Exception as e:
-            print(f"  Error deleting {d}: {e}")
+# Clean storage directories based on USE_SUPABASE environment variable
+use_supabase = os.getenv("USE_SUPABASE", "false").strip().lower() == "true"
+
+if use_supabase:
+    SUPABASE_URL = os.getenv("SUPABASE_URL")
+    SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+    SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "shortify")
+    
+    if SUPABASE_URL and SUPABASE_KEY:
+        print(f"USE_SUPABASE is true. Cleaning Supabase Storage bucket '{SUPABASE_BUCKET}'...")
+        import httpx
+        url_list = f"{SUPABASE_URL}/storage/v1/object/list/{SUPABASE_BUCKET}"
+        url_delete = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}"
+        headers = {
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        all_files = []
+        
+        def traverse(prefix):
+            payload = {
+                "prefix": prefix,
+                "limit": 100,
+                "sortBy": {"column": "name", "order": "asc"}
+            }
+            try:
+                with httpx.Client(timeout=30.0) as client:
+                    resp = client.post(url_list, headers=headers, json=payload)
+                    if resp.status_code != 200:
+                        print(f"Error listing prefix '{prefix}': {resp.status_code} {resp.text}")
+                        return
+                    items = resp.json()
+                    for item in items:
+                        name = item.get("name")
+                        if not name:
+                            continue
+                        item_path = f"{prefix}/{name}" if prefix else name
+                        if item.get("metadata") is None and item.get("id") is None:
+                            # Subfolder/Directory
+                            traverse(item_path)
+                        else:
+                            # File
+                            all_files.append(item_path)
+            except Exception as exc:
+                print(f"Exception listing prefix '{prefix}': {exc}")
+                
+        traverse("")
+        
+        if all_files:
+            print(f"Found {len(all_files)} files in Supabase bucket to delete.")
+            for i in range(0, len(all_files), 100):
+                chunk = all_files[i:i+100]
+                payload = {"prefixes": chunk}
+                try:
+                    with httpx.Client(timeout=30.0) as client:
+                        resp = client.request("DELETE", url_delete, headers=headers, json=payload)
+                        if resp.status_code == 200:
+                            print(f"  Successfully deleted files: {chunk}")
+                        else:
+                            print(f"  Failed to delete files {chunk}. Status: {resp.status_code}, Body: {resp.text}")
+                except Exception as exc:
+                    print(f"Exception deleting files {chunk}: {exc}")
+        else:
+            print("Supabase bucket is already empty.")
+    else:
+        print("USE_SUPABASE is true, but SUPABASE_URL or SUPABASE_KEY is missing. Skipping Supabase clean.")
+else:
+    print("USE_SUPABASE is false. Cleaning local storage, data, and cache directories...")
+    dirs_to_delete = [
+        "cache",
+        "storage",
+        "data",
+        ".pytest_cache",
+    ]
+    for d in dirs_to_delete:
+        if os.path.exists(d):
+            try:
+                shutil.rmtree(d)
+                print(f"  Deleted local directory: {d}")
+            except Exception as e:
+                print(f"  Error deleting local directory {d}: {e}")
 
 # Recreate the base directories and their expected structure
 dirs_to_recreate = [

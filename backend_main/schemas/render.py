@@ -18,6 +18,7 @@ class RenderRequest(BaseModel):
     add_subtitle: bool
     add_stickers: bool
     add_textoverlay: bool
+    audio_ducking: bool = True
 
 class RenderResponse(BaseModel):
     project_id: uuid.UUID

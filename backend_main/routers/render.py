@@ -128,6 +128,7 @@ def trigger_render(
         add_subtitle=body.add_subtitle,
         add_stickers=body.add_stickers,
         add_textoverlay=body.add_textoverlay,
+        audio_ducking=body.audio_ducking,
     )
 
     return RenderResponse(

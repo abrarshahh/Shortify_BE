@@ -50,7 +50,9 @@ class RenderPlanner:
         timeline: TimelineIR,
         output_filename: str,
         aspect_ratio: str = "9:16",
-        clip_scores: Optional[Dict[str, Any]] = None
+        clip_scores: Optional[Dict[str, Any]] = None,
+        audio_ducking: bool = True,
+        music_path: Optional[str] = None
     ) -> List[str]:
         """
         Parses the multi-track TimelineIR and compiles it into a single, optimized FFmpeg Command.
@@ -100,8 +102,10 @@ class RenderPlanner:
 
         # Register audios (ambient, SFX)
         for audio in timeline.audio_clips:
+            if audio.source == "background_music" and music_path:
+                path = music_path
             # Check if SFX
-            if audio.source.startswith("sfx_"):
+            elif audio.source.startswith("sfx_"):
                 path = resolve_asset_path("sfx", audio.source)
             else:
                 path = os.path.join(self.clips_dir, audio.source)
@@ -173,7 +177,49 @@ class RenderPlanner:
             speed_val = clip.speed if clip.speed else 1.0
             pts_multiplier = 1.0 / speed_val
             
+            color_filter_str = ""
+            if clip.color_grade:
+                from backend_ai.effects.color import ColorGradeParams as EffectColorGradeParams, build_ffmpeg_color_filter
+                params_dict = clip.color_grade.model_dump()
+                effect_params = EffectColorGradeParams(**params_dict)
+                color_filter_str = build_ffmpeg_color_filter(effect_params)
+
+            clip_effect_str = ""
+            if clip.clip_effect and clip.clip_effect.effect_type != "none":
+                effect_type = clip.clip_effect.effect_type
+                params = clip.clip_effect.parameters or {}
+                if effect_type == "blur":
+                    max_blur_size = int(params.get("max_blur_size", 51))
+                    if max_blur_size % 2 == 0:
+                        max_blur_size = max(1, max_blur_size - 1)
+                    radius = max(1, max_blur_size // 4)
+                    clip_effect_str = f"boxblur=lr={radius}:lp=2"
+                elif effect_type == "pixelate":
+                    cell_size = int(params.get("max_cell_size", 32))
+                    if cell_size <= 1:
+                        cell_size = 32
+                    clip_effect_str = f"scale=iw/{cell_size}:ih/{cell_size},scale={target_w}:{target_h}:flags=neighbor"
+                elif effect_type == "vignette":
+                    vignette_strength = float(params.get("vignette_strength", 0.5))
+                    import math
+                    angle = vignette_strength * (math.pi / 4.0)
+                    clip_effect_str = f"vignette=angle={angle:.4f}"
+                elif effect_type == "mirror":
+                    direction = str(params.get("direction", "horizontal")).lower()
+                    if direction == "vertical":
+                        clip_effect_str = "vflip"
+                    else:
+                        clip_effect_str = "hflip"
+                elif effect_type == "glitch":
+                    clip_effect_str = "noise=alls=20:allf=t+u"
+                elif effect_type == "light_leak":
+                    clip_effect_str = "eq=brightness=0.1:contrast=1.1"
+
             scale_filter = f"scale={new_w}:{new_h},crop={target_w}:{target_h}:{x1}:{y1}"
+            if color_filter_str:
+                scale_filter = f"{scale_filter},{color_filter_str}"
+            if clip_effect_str:
+                scale_filter = f"{scale_filter},{clip_effect_str}"
             
             if is_image:
                 dur = clip.end_in_clip - clip.start_in_clip
@@ -189,11 +235,11 @@ class RenderPlanner:
 
             # Process Audio
             a_label = f"a_proc_{i}"
-            vol_val = 0.0 if clip.mute else 1.0
+            vol_val = 0.0 if (clip.mute or audio_ducking) else 1.0
             dur = clip.end_in_clip - clip.start_in_clip
             eff_dur = dur * pts_multiplier
 
-            if has_audio:
+            if has_audio and not audio_ducking:
                 atrim_filter = f"atrim=start={clip.start_in_clip}:end={clip.end_in_clip},asetpts={pts_multiplier}*(PTS-STARTPTS)"
                 filter_complex_parts.append(
                     f"[{input_idx}:a]{atrim_filter},volume={vol_val}[{a_label}]"
@@ -283,7 +329,9 @@ class RenderPlanner:
         mixed_audio_sources = ["[a_main_concat]"]
         for i, audio in enumerate(timeline.audio_clips):
             # Check path
-            if audio.source.startswith("sfx_"):
+            if audio.source == "background_music" and music_path:
+                path = music_path
+            elif audio.source.startswith("sfx_"):
                 path = resolve_asset_path("sfx", audio.source)
             else:
                 path = os.path.join(self.clips_dir, audio.source)

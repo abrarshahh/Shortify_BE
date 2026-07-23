@@ -123,3 +123,97 @@ def test_convert_edl_to_timeline_ir():
     assert len(ir.audio_clips) == 1
     assert ir.audio_clips[0].source == "background_music"
     assert ir.audio_clips[0].start_in_audio == 2.5
+
+
+def test_global_color_grade_inheritance_and_clip_effect():
+    # Construct a legacy EDL document dict with global color grade and a clip effect
+    legacy_edl_data = {
+        "title": "Inheritance Reel",
+        "storyline": "Hiking trip",
+        "total_duration": 10.0,
+        "music_start_offset": 2.5,
+        "global_color_grade": {
+            "brightness": 1.2,
+            "contrast": 1.1,
+            "gamma": 1.0,
+            "saturation": 1.0,
+            "vibrance": 1.0,
+            "hue": 0.0,
+            "temperature": 15.0,
+            "vignette_strength": 0.2,
+            "vignette_radius": 0.8
+        },
+        "timeline": [
+            {
+                "clip_name": "vlog.mp4",
+                "start_in_clip": 1.0,
+                "end_in_clip": 6.0,
+                "timeline_start": 0.0,
+                "timeline_end": 5.0,
+                "transition": "none",
+                "text_overlay": "Awesome Hike!",
+                "clip_effect": {
+                    "effect_type": "blur",
+                    "parameters": {"max_blur_size": 25}
+                },
+                "details": {
+                    "visual_cue": "Hiking shot",
+                    "sound_design": "whoosh",
+                    "pacing_style": "jump-cut",
+                    "is_hook": True,
+                    "keep_original_audio": True
+                }
+            },
+            {
+                "clip_name": "vlog2.mp4",
+                "start_in_clip": 0.0,
+                "end_in_clip": 5.0,
+                "timeline_start": 5.0,
+                "timeline_end": 10.0,
+                "transition": "none",
+                "text_overlay": "Clip with override!",
+                "color_grade": {
+                    "brightness": 1.0,
+                    "contrast": 1.0,
+                    "gamma": 1.0,
+                    "saturation": 1.0,
+                    "vibrance": 1.0,
+                    "hue": 0.0,
+                    "temperature": 0.0,
+                    "vignette_strength": 0.0,
+                    "vignette_radius": 0.75
+                },
+                "details": {
+                    "visual_cue": "Another shot",
+                    "sound_design": "whoosh",
+                    "pacing_style": "jump-cut",
+                    "is_hook": False,
+                    "keep_original_audio": True
+                }
+            }
+        ]
+    }
+    
+    edl = EDLDocument.model_validate(legacy_edl_data)
+    ir = convert_edl_to_timeline_ir(edl)
+    
+    assert ir.title == "Inheritance Reel"
+    assert len(ir.video_clips) == 2
+    
+    # Clip 1 should inherit global_color_grade
+    clip_1 = ir.video_clips[0]
+    assert clip_1.color_grade is not None
+    assert clip_1.color_grade.brightness == 1.2
+    assert clip_1.color_grade.temperature == 15.0
+    
+    # Clip 1 should have clip_effect populated
+    assert clip_1.clip_effect is not None
+    assert clip_1.clip_effect.effect_type == "blur"
+    assert clip_1.clip_effect.parameters == {"max_blur_size": 25}
+    
+    # Clip 2 has an explicit local color_grade override
+    clip_2 = ir.video_clips[1]
+    assert clip_2.color_grade is not None
+    assert clip_2.color_grade.brightness == 1.0
+    assert clip_2.color_grade.temperature == 0.0
+

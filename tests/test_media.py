@@ -7,6 +7,29 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from backend_ai.agents.media_agent import MediaAnalyst
 
+def test_json_quote_repair():
+    analyst = MediaAnalyst()
+    
+    # Test JSON with unescaped double quotes in string fields
+    bad_json = """{
+  "summary": "This is a summary with "nested" quotes",
+  "mood": "Calm",
+  "interesting_segments": [
+    {
+      "start": 0.0,
+      "end": 3.0,
+      "description": "Showing the "struggles" of the ascent",
+      "priority_score": 8.0
+    }
+  ]
+}"""
+    
+    repaired = analyst._repair_json_quotes(bad_json)
+    parsed = json.loads(repaired)
+    
+    assert parsed["summary"] == 'This is a summary with "nested" quotes'
+    assert parsed["interesting_segments"][0]["description"] == 'Showing the "struggles" of the ascent'
+
 def run_video_analysis(video_path):
     if not os.path.exists(video_path):
         print(f"Error: File not found at {video_path}")

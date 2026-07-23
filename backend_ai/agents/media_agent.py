@@ -43,6 +43,49 @@ class MediaAnalyst:
             logger.error(f"MediaAnalyst: Error extracting file metadata: {e}")
             return {"error": f"Could not extract technical metadata: {str(e)}"}
 
+    def _repair_json_quotes(self, text: str) -> str:
+        """
+        Auto-escapes unescaped double quotes inside key-value string fields.
+        Example: "description": "Group saying "joy" in nature" -> "description": "Group saying \"joy\" in nature"
+        """
+        import re
+        lines = text.splitlines()
+        repaired_lines = []
+        for line in lines:
+            # Match pattern: "key": "value" with optional trailing comma
+            match = re.match(r'^(\s*"[^"]+")\s*:\s*"(.*)"\s*(,?)\s*$', line)
+            if match:
+                key_part = match.group(1)
+                value_content = match.group(2)
+                comma_part = match.group(3)
+                
+                # Escape double quotes inside value_content unless they are already escaped
+                fixed_value = []
+                i = 0
+                n = len(value_content)
+                while i < n:
+                    char = value_content[i]
+                    if char == '"':
+                        # Count backslashes preceding it
+                        backslash_count = 0
+                        j = i - 1
+                        while j >= 0 and value_content[j] == '\\':
+                            backslash_count += 1
+                            j -= 1
+                        if backslash_count % 2 == 0:
+                            # Even number of backslashes means the quote itself is not escaped
+                            fixed_value.append('\\"')
+                        else:
+                            fixed_value.append('"')
+                    else:
+                        fixed_value.append(char)
+                    i += 1
+                
+                repaired_lines.append(f'{key_part}: "{"".join(fixed_value)}"{comma_part}')
+            else:
+                repaired_lines.append(line)
+        return "\n".join(repaired_lines)
+
     def _normalize_analysis_durations(self, result: Dict[str, Any], cache_path: Optional[str] = None) -> Dict[str, Any]:
         """
         Robustly converts segment start/end timestamps from MM.SS format to seconds
@@ -169,7 +212,9 @@ class MediaAnalyst:
                 err_msg = str(e).lower()
                 is_transient = any(phrase in err_msg for phrase in [
                     "429", "rate limit", "quota exceeded", "resource exhausted",
-                    "timeout", "too many requests", "service unavailable", "503"
+                    "timeout", "too many requests", "service unavailable", "503",
+                    "disconnect", "connection", "closed", "reset", "eof", "broken pipe",
+                    "peer", "network", "http", "socket"
                 ])
                 if not is_transient or attempt >= max_upload_retries - 1:
                     logger.error(f"MediaAnalyst: Non-retryable error during upload or retries exhausted: {e}")
@@ -320,7 +365,8 @@ When scoring segments, apply these PRIORITY RULES:
                 Important Instructions:
                 1. "all_segments": Break the ENTIRE video down into chronological, sequential segments. Let the natural action dictate the duration of each segment. Segment the video at natural boundaries such as camera cuts, changes in scene, or major shifts in action/subject. A segment can be short or long depending on the action. Give each segment a priority_score based on how useful it would be for a highlight reel — APPLY the creator goal priority rules above. All start and end values MUST be in raw seconds, not minutes or MM.SS format.
                 2. "captions": Accurately transcribe any speech heard in the video into the captions list.
-                3. Do not include any markdown formatting or extra text. Only return the raw JSON object.
+                3. Do NOT use unescaped double quotes (") inside any string fields (such as 'description', 'summary', or 'subjects'). If you need to quote or emphasize something, use single quotes (') instead.
+                4. Do not include any markdown formatting or extra text. Only return the raw JSON object.
                 """
 
             # Generate content using the new SDK with model fallback and exponential backoff
@@ -372,7 +418,17 @@ When scoring segments, apply these PRIORITY RULES:
                 if text.startswith("```"):
                     text = text.split("\n", 1)[1].rsplit("\n", 1)[0]
                 
-                analysis = json.loads(text)
+                try:
+                    analysis = json.loads(text)
+                except json.JSONDecodeError as jde:
+                    logger.warning(f"MediaAnalyst: JSON parsing failed ({jde}). Attempting auto-repair on quotes...")
+                    try:
+                        repaired_text = self._repair_json_quotes(text)
+                        analysis = json.loads(repaired_text)
+                        logger.info("MediaAnalyst: JSON auto-repair succeeded!")
+                    except Exception as repair_err:
+                        logger.error(f"MediaAnalyst: Auto-repair failed: {repair_err}")
+                        raise jde
                 
                 # Extract technical metadata locally
                 # Combine results

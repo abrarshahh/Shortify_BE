@@ -62,11 +62,13 @@ def _execute_render_task(
     add_subtitle: bool = True,
     add_stickers: bool = True,
     add_textoverlay: bool = True,
+    audio_ducking: bool = True,
 ):
     """
     Synchronous worker task running inside the ThreadPool thread.
     Ties the orchestrator lifecycle and updates state progress.
     """
+    is_successful = False
     logger.info(f"[Worker] Starting job for project {project_id}")
     update_job(project_id, {
         "status": "running",
@@ -113,6 +115,7 @@ def _execute_render_task(
             "add_subtitle": add_subtitle,
             "add_stickers": add_stickers,
             "add_textoverlay": add_textoverlay,
+            "audio_ducking": audio_ducking,
             "rhythm_data": {},
             "visual_data": [],
             "edl": {},
@@ -181,7 +184,7 @@ def _execute_render_task(
                 except Exception as e:
                     logger.warning(f"[Worker] Failed to delete intermediate file {p}: {e}")
 
-        # Save result to DB & Upload outputs, cache, and logs to Supabase
+        # Save result to DB & Upload cache and logs to Supabase
         db = SessionLocal()
         try:
             pid_uuid = uuid.UUID(project_id)
@@ -192,14 +195,6 @@ def _execute_render_task(
                 proj.last_output_path = rel_path
                 db.commit()
                 
-                # Upload the final video
-                upload_to_supabase(final_video, rel_path, mime_type="video/mp4")
-                
-                # Upload the thumbnail if exists
-                thumb_local = os.path.join(os.path.dirname(final_video), "thumbnail.jpg")
-                if os.path.exists(thumb_local):
-                    upload_to_supabase(thumb_local, f"exports/{project_id}/thumbnail.jpg", mime_type="image/jpeg")
-                    
                 # Upload cache files to Supabase
                 for f_subpath in cache_files:
                     local_cache_path = os.path.join("cache", user_folder, project_id, f_subpath.replace('/', os.sep))
@@ -215,6 +210,9 @@ def _execute_render_task(
                         upload_to_supabase(local_log, f"logs/{project_id}/{log_file}", mime_type="text/plain")
         finally:
             db.close()
+
+        # Mark render task run as successful (prevents deleting export files during cleanup)
+        is_successful = True
 
         update_job(project_id, {
             "status": "done",
@@ -278,37 +276,42 @@ def _execute_render_task(
             
         # Clean up local disk files to prevent Render container from running out of disk space
         import shutil
-        try:
-            # 1. Delete export directory
-            export_dir = os.path.join(STORAGE_ROOT, "exports", project_id)
-            if os.path.exists(export_dir):
-                shutil.rmtree(export_dir, ignore_errors=True)
-                logger.info(f"[Worker Cleanup] Deleted local export directory: {export_dir}")
-                
-            # 2. Delete cache directory
-            project_cache_dir = os.path.join("cache", user_folder, project_id)
-            if os.path.exists(project_cache_dir):
-                shutil.rmtree(project_cache_dir, ignore_errors=True)
-                logger.info(f"[Worker Cleanup] Deleted local cache directory: {project_cache_dir}")
-                
-            # 3. Delete downloaded source videos/audios used in this run
-            for path in video_paths:
-                if os.path.exists(path):
-                    try:
-                        os.unlink(path)
-                        logger.info(f"[Worker Cleanup] Deleted local source video: {path}")
-                    except Exception as unlink_err:
-                        logger.warning(f"[Worker Cleanup] Failed to delete source video {path}: {unlink_err}")
-            
-            if music_path and os.path.exists(music_path):
-                try:
-                    os.unlink(music_path)
-                    logger.info(f"[Worker Cleanup] Deleted local music file: {music_path}")
-                except Exception as unlink_err:
-                    logger.warning(f"[Worker Cleanup] Failed to delete music file {music_path}: {unlink_err}")
+        from backend_main.supabase_storage import is_supabase_configured
+        
+        if is_supabase_configured():
+            try:
+                # 1. Delete export directory ONLY if the job failed or was cancelled
+                if not is_successful:
+                    export_dir = os.path.join(STORAGE_ROOT, "exports", project_id)
+                    if os.path.exists(export_dir):
+                        shutil.rmtree(export_dir, ignore_errors=True)
+                        logger.info(f"[Worker Cleanup] Deleted local export directory for failed/cancelled job: {export_dir}")
                     
-        except Exception as cleanup_err:
-            logger.error(f"[Worker Cleanup] Error running cleanup: {cleanup_err}")
+                # 2. Delete cache directory
+                project_cache_dir = os.path.join("cache", user_folder, project_id)
+                if os.path.exists(project_cache_dir):
+                    shutil.rmtree(project_cache_dir, ignore_errors=True)
+                    logger.info(f"[Worker Cleanup] Deleted local cache directory: {project_cache_dir}")
+                    
+                # 3. Delete downloaded source videos/audios used in this run
+                for path in video_paths:
+                    if os.path.exists(path):
+                        try:
+                            os.unlink(path)
+                            logger.info(f"[Worker Cleanup] Deleted local source video: {path}")
+                        except Exception as unlink_err:
+                            logger.warning(f"[Worker Cleanup] Failed to delete source video {path}: {unlink_err}")
+                
+                if music_path and os.path.exists(music_path):
+                    try:
+                        os.unlink(music_path)
+                        logger.info(f"[Worker Cleanup] Deleted local music file: {music_path}")
+                    except Exception as unlink_err:
+                        logger.warning(f"[Worker Cleanup] Failed to delete music file {music_path}: {unlink_err}")
+            except Exception as cleanup_err:
+                logger.error(f"[Worker Cleanup] Error running cleanup: {cleanup_err}")
+        else:
+            logger.info("[Worker Cleanup] USE_SUPABASE is false. Retaining all local exports, cache, and media files.")
 
 def cancel_job(project_id: str) -> bool:
     """
@@ -353,6 +356,7 @@ def enqueue_job(
     add_subtitle: bool = True,
     add_stickers: bool = True,
     add_textoverlay: bool = True,
+    audio_ducking: bool = True,
 ):
     """Enqueues a rendering task into the thread pool."""
     update_job(project_id, {
@@ -376,5 +380,6 @@ def enqueue_job(
         add_subtitle=add_subtitle,
         add_stickers=add_stickers,
         add_textoverlay=add_textoverlay,
+        audio_ducking=audio_ducking,
     )
     active_futures[project_id] = future

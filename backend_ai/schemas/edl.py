@@ -89,6 +89,13 @@ class AudioDuckingParams(BaseModel):
     music_volume_during_segment: float = Field(0.22, ge=0.0, le=1.0)
 
 
+class ClipEffectParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    effect_type: str = Field("none", description="Type of visual filter/effect to apply. E.g. 'none', 'blur', 'glitch', 'pixelate', 'ripple', 'spin', 'light_leak'")
+    parameters: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Variables custom-tailoring the filter")
+
+
 class EDLTimelineItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -113,6 +120,7 @@ class EDLTimelineItem(BaseModel):
     sticker_path: Optional[str] = None
     sticker_position: Optional[str] = None
     effect_path: Optional[str] = None
+    clip_effect: Optional[ClipEffectParams] = None
     details: EDLClipDetails
 
     @model_validator(mode="after")
@@ -175,6 +183,7 @@ class EDLDocument(BaseModel):
     storyline: str
     total_duration: float = Field(gt=0)
     music_start_offset: float = Field(ge=0)
+    global_color_grade: Optional[ColorGradeParams] = None
     timeline: List[EDLTimelineItem]
 
     @model_validator(mode="after")
@@ -293,6 +302,7 @@ class TimelineClip(BaseModel):
     color_grade: Optional[ColorGradeParams] = None
     visual_properties: Optional[VisualProperties] = None
 
+    clip_effect: Optional[ClipEffectParams] = None
     effect_asset_id: Optional[str] = ""
     sticker_asset_id: Optional[str] = ""
 
@@ -443,8 +453,11 @@ def convert_edl_to_timeline_ir(edl: EDLDocument) -> TimelineIR:
             transition_in_duration=t_in_dur,
             transition_out=TransitionType.none,
             transition_out_duration=0.0,
-            color_grade=item.color_grade,
-            visual_properties=None
+            color_grade=item.color_grade or edl.global_color_grade,
+            visual_properties=None,
+            clip_effect=item.clip_effect,
+            effect_asset_id=item.details.effect_asset_id or "",
+            sticker_asset_id=item.details.sticker_asset_id or ""
         )
         
         # Legacy speed multiplier parsing
