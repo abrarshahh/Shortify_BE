@@ -183,49 +183,44 @@ class ShortifyOrchestrator:
         logger.info("NODE: init_pipeline")
         
         cache_path = self.cache_dir
-        dir_analysis_path = os.path.join(cache_path, "director_analysis", "director_analysis.json")
+        import json
         
-        if os.path.exists(dir_analysis_path):
-            logger.info(f"Orchestrator: Found cached director_analysis.json at {dir_analysis_path}. Directly starting editing.")
-            import json
-            # Load cache files
+        # Load clip_scores cache if it exists
+        clip_scores = {}
+        clip_scores_path = os.path.join(cache_path, "clip_scores", "clip_scores.json")
+        if os.path.exists(clip_scores_path):
             try:
-                # Load director_analysis
-                with open(dir_analysis_path, "r") as f:
-                    edl = json.load(f)
-                    
-                # Load clip_scores
-                clip_scores = {}
-                clip_scores_path = os.path.join(cache_path, "clip_scores", "clip_scores.json")
-                if os.path.exists(clip_scores_path):
-                    with open(clip_scores_path, "r") as f:
-                        clip_scores = json.load(f)
-                        
-                # Load media_analysis
-                visual_data = []
-                media_analysis_path = os.path.join(cache_path, "media_analysis", "media_analysis.json")
-                if os.path.exists(media_analysis_path):
-                    with open(media_analysis_path, "r") as f:
-                        visual_data = json.load(f)
-                        
-                # Load music_analysis
-                rhythm_data = {}
-                music_analysis_path = os.path.join(cache_path, "music_analysis", "music_analysis.json")
-                if os.path.exists(music_analysis_path):
-                    with open(music_analysis_path, "r") as f:
-                        rhythm_data = json.load(f)
-                        
-                return {
-                    "edl": edl,
-                    "clip_scores": clip_scores,
-                    "visual_data": visual_data,
-                    "rhythm_data": rhythm_data,
-                    "has_cached_director": True
-                }
+                with open(clip_scores_path, "r") as f:
+                    clip_scores = json.load(f)
             except Exception as e:
-                logger.error(f"Orchestrator: Failed to load project cache: {e}. Falling back to default pipeline procedure.")
+                logger.warning(f"Orchestrator: Failed to load clip_scores cache: {e}")
                 
-        return {"has_cached_director": False}
+        # Load media_analysis cache if it exists
+        visual_data = []
+        media_analysis_path = os.path.join(cache_path, "media_analysis", "media_analysis.json")
+        if os.path.exists(media_analysis_path):
+            try:
+                with open(media_analysis_path, "r") as f:
+                    visual_data = json.load(f)
+            except Exception as e:
+                logger.warning(f"Orchestrator: Failed to load media_analysis cache: {e}")
+                
+        # Load music_analysis cache if it exists
+        rhythm_data = {}
+        music_analysis_path = os.path.join(cache_path, "music_analysis", "music_analysis.json")
+        if os.path.exists(music_analysis_path):
+            try:
+                with open(music_analysis_path, "r") as f:
+                    rhythm_data = json.load(f)
+            except Exception as e:
+                logger.warning(f"Orchestrator: Failed to load music_analysis cache: {e}")
+                
+        return {
+            "clip_scores": clip_scores,
+            "visual_data": visual_data,
+            "rhythm_data": rhythm_data,
+            "has_cached_director": False
+        }
 
     def route_init_pipeline(self, state: AgentState) -> str:
         if state.get("has_cached_director"):
@@ -922,10 +917,10 @@ class ShortifyOrchestrator:
         # 3. Hook Duration Correction
         hook_item = timeline[0]
         hook_dur = float(hook_item["end_in_clip"]) - float(hook_item["start_in_clip"])
-        if hook_dur > 3.5:
-            logger.info(f"Hook post-processing: Trimming hook duration from {hook_dur:.2f}s to 3.5s.")
+        if hook_dur > 3.0:
+            logger.info(f"Hook post-processing: Trimming hook duration from {hook_dur:.2f}s to 3.0s.")
             # Adjust duration
-            hook_item["end_in_clip"] = round(float(hook_item["start_in_clip"]) + 3.5, 3)
+            hook_item["end_in_clip"] = round(float(hook_item["start_in_clip"]) + 3.0, 3)
             # Recalculate
             recalculate_timeline_times(timeline)
 

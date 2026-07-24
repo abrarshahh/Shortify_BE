@@ -159,7 +159,7 @@ class EDLTimelineItem(BaseModel):
                 raise ValueError("speed_keyframes must start at time fraction 0.0 and end at 1.0.")
                 
         if self.text_preset:
-            valid_text_presets = {"bold_hype", "classic_clean", "neon_glow", "minimal_pop"}
+            valid_text_presets = {"bold_hype", "classic_clean", "neon_glow", "minimal_pop", "none"}
             if self.text_preset not in valid_text_presets:
                 raise ValueError(f"Invalid text_preset '{self.text_preset}'. Must be one of: {', '.join(valid_text_presets)}")
                 
@@ -298,6 +298,7 @@ class TimelineClip(BaseModel):
     transition_in_duration: float = Field(0.0, ge=0.0)
     transition_out: TransitionType = TransitionType.none
     transition_out_duration: float = Field(0.0, ge=0.0)
+    transition_params: Optional[Dict[str, Any]] = None
 
     color_grade: Optional[ColorGradeParams] = None
     visual_properties: Optional[VisualProperties] = None
@@ -409,6 +410,8 @@ class TimelineIR(BaseModel):
     title: str
     storyline: str
     total_duration: float = Field(gt=0.0)
+    style: str = "general"
+    global_color_grade: Optional[ColorGradeParams] = None
     
     video_clips: List[TimelineClip] = Field(default_factory=list)
     audio_clips: List[TimelineAudio] = Field(default_factory=list)
@@ -453,6 +456,7 @@ def convert_edl_to_timeline_ir(edl: EDLDocument) -> TimelineIR:
             transition_in_duration=t_in_dur,
             transition_out=TransitionType.none,
             transition_out_duration=0.0,
+            transition_params=item.transition_params,
             color_grade=item.color_grade or edl.global_color_grade,
             visual_properties=None,
             clip_effect=item.clip_effect,
@@ -532,9 +536,9 @@ def convert_edl_to_timeline_ir(edl: EDLDocument) -> TimelineIR:
             end_in_audio=edl.music_start_offset + edl.total_duration,
             timeline_start=0.0,
             timeline_end=edl.total_duration,
-            volume=0.22,
+            volume=0.70,
             ducking_enabled=True,
-            ducking_target_volume=0.06
+            ducking_target_volume=0.22
         )
         audio_clips.append(music_clip)
         
@@ -545,5 +549,7 @@ def convert_edl_to_timeline_ir(edl: EDLDocument) -> TimelineIR:
         video_clips=video_clips,
         audio_clips=audio_clips,
         text_overlays=text_overlays,
-        stickers=stickers
+        stickers=stickers,
+        style=getattr(edl, "style", "general") or "general",
+        global_color_grade=edl.global_color_grade
     )

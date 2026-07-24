@@ -109,7 +109,7 @@ EDL_JSON_SCHEMA = {
                     "stabilize_strength": {"type": "number", "minimum": 0.0, "maximum": 1.0},
                     "text_preset": {
                         "type": "string",
-                        "enum": ["bold_hype", "classic_clean", "neon_glow", "minimal_pop"]
+                        "enum": ["bold_hype", "classic_clean", "neon_glow", "minimal_pop", "none"]
                     },
                     "text_animation": {
                         "type": "string",
@@ -681,6 +681,7 @@ class CreativeDirector:
         - SEQUENTIAL ORDER: 'timeline_start' must strictly increase. No overlapping clips.
         - NO REPETITION: Avoid using the same clip twice in a row. Use different clips to maintain visual interest.
         - USER INTENT IS SUPREME: You MUST follow the User Intent perfectly. If the user asks for a specific scene, action, or chronological order, you must provide it exactly as requested, prioritizing matching segments (highest relevance_score).
+        - CHRONOLOGICAL NARRATIVE SEQUENCING (CRITICAL): If the user's prompt or brief specifies a sequence of events (e.g., ascending/climbing -> struggling -> reaching the destination/lake -> joy), you MUST sequence the selected timeline clips to form this exact chronological progression. Do not mix up the order of narrative stages.
         - SMART CLIP SELECTION (STRICT CASCADE LOGIC): You MUST select clips using this exact priority sequence:
           1. FIRST, only look at segments from the 'highlights' array.
           2. FILTER by prompt relevance: prioritize segments where 'relevance_score' is high (>= 0.70), and further prioritize segments with higher 'local_score' (scored by our local ClipScoringAgent).
@@ -729,6 +730,13 @@ class CreativeDirector:
             - light_leak: `{{"color": "white | orange | red | blue", "intensity": float}}`
             - spin: `{{"angle_delta": float, "zoom_scale": float}}`
             - ripple: `{{"wave_frequency": float, "wave_amplitude": float}}`
+          - MASKING & CUSTOM TRANSITIONS:
+            To apply custom shape-mask transitions (like circle, heart, star, diamond reveals):
+            1. Set the `"transition"` to the shape name, one of: `"circleopen"`, `"heart"`, `"star"`, `"diamond"`.
+            2. Define `"transition_params"` with:
+               - `"mask_mode"`: Set to `"custom"` to invoke the custom Mask Agent.
+               - `"custom_mask_name"`: One of `"circle"`, `"heart"`, `"star"`, `"diamond"`.
+            If you want standard native transitions, set `"mask_mode"` to `"native"` (which is the default).
         - COLOR GRADING (GLOBAL & LOCAL): You can define a global color grade aesthetic at the root level using `global_color_grade`. If you want a specific clip to have its own color correction/grading override, define the `color_grade` object inside that timeline item. Otherwise, leave it out to inherit the global grading. Reason over each clip's `avg_brightness` (exposure score), `face_detected`, and the overall project style/vibe to set optimal parameters:
           - Brightness & Exposure Correction:
             - If `avg_brightness` is low (e.g. < 90), the clip is dark/underexposed: you MUST boost `brightness` (1.1 to 1.3), increase `contrast` (1.1 to 1.25), and lift `gamma` (1.05 to 1.3) to recover shadow detail.
@@ -945,6 +953,21 @@ class CreativeDirector:
                 clip_name = last_item.get("clip_name", "")
                 parts = clip_name.split(":")
                 
+                # Determine speed multiplier to convert screen seconds to source clip seconds
+                speed = 1.0
+                speed_preset = last_item.get("speed_preset")
+                pacing_style = last_item.get("details", {}).get("pacing_style", "jump-cut")
+                if speed_preset:
+                    if speed_preset == "constant_fast":
+                        speed = 2.0
+                    elif speed_preset in ("ramp_up", "ramp_down"):
+                        speed = 1.13
+                    elif speed_preset == "speed_bump":
+                        speed = 1.2
+                else:
+                    if pacing_style == "speed-ramp":
+                        speed = 1.5
+                
                 actual_diff = 0.0
                 if len(parts) == 3:
                     filename, start_str, end_str = parts
@@ -954,11 +977,12 @@ class CreativeDirector:
                         max_duration = clip_duration_lookup.get(filename)
                         if max_duration is not None:
                             safe_max_duration = max(0.0, max_duration - 0.15)
-                            allowed_extension = max(0.0, safe_max_duration - end_val)
-                            actual_diff = min(diff, allowed_extension)
+                            allowed_extension_screen = max(0.0, safe_max_duration - end_val) / speed
+                            actual_diff = min(diff, allowed_extension_screen)
+                            source_diff = actual_diff * speed
                             
                             last_item["timeline_end"] = last_item.get("timeline_end", 0) + actual_diff
-                            new_end = end_val + actual_diff
+                            new_end = end_val + source_diff
                             last_item["end_in_clip"] = new_end - start_val
                             last_item["clip_name"] = f"{filename}:{start_val:.3f}:{new_end:.3f}"
                     except ValueError:
@@ -971,11 +995,12 @@ class CreativeDirector:
                             safe_max_duration = max(0.0, max_duration - 0.15)
                             start_val = float(last_item.get("start_in_clip", 0.0))
                             end_val = float(last_item.get("end_in_clip", 0.0))
-                            allowed_extension = max(0.0, safe_max_duration - end_val)
-                            actual_diff = min(diff, allowed_extension)
+                            allowed_extension_screen = max(0.0, safe_max_duration - end_val) / speed
+                            actual_diff = min(diff, allowed_extension_screen)
+                            source_diff = actual_diff * speed
                             
                             last_item["timeline_end"] = last_item.get("timeline_end", 0) + actual_diff
-                            last_item["end_in_clip"] = end_val + actual_diff
+                            last_item["end_in_clip"] = end_val + source_diff
                     except ValueError:
                         pass
                 

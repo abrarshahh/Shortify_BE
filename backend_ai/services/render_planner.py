@@ -85,6 +85,14 @@ class RenderPlanner:
                 clip_file = clip.source
             add_input(clip_file)
 
+        # Register custom transition masks
+        for clip in timeline.video_clips:
+            if clip.transition_in != TransitionType.none and clip.transition_params:
+                if clip.transition_params.get("mask_mode") == "custom":
+                    mask_path = clip.transition_params.get("custom_mask_path")
+                    if mask_path and os.path.exists(mask_path):
+                        add_input(mask_path)
+
         # Register overlays (Layer 3 effects)
         for clip in timeline.video_clips:
             if clip.color_grade or (hasattr(clip, "effect_asset_id") and getattr(clip, "effect_asset_id")):
@@ -178,9 +186,20 @@ class RenderPlanner:
             pts_multiplier = 1.0 / speed_val
             
             color_filter_str = ""
-            if clip.color_grade:
+            clip_color_grade = clip.color_grade
+            if clip_color_grade and timeline.global_color_grade and clip_color_grade.model_dump() == timeline.global_color_grade.model_dump():
+                # Avoid double color grading if a global style/LUT is active
+                style_lower = (timeline.style or "general").lower()
+                luts_dir = os.path.abspath(os.path.join("data", "luts"))
+                lut_exists = os.path.exists(os.path.join(luts_dir, f"{style_lower}.cube"))
+                if not lut_exists and style_lower != "general" and style_lower != "none":
+                    lut_exists = True
+                if lut_exists:
+                    clip_color_grade = None
+
+            if clip_color_grade:
                 from backend_ai.effects.color import ColorGradeParams as EffectColorGradeParams, build_ffmpeg_color_filter
-                params_dict = clip.color_grade.model_dump()
+                params_dict = clip_color_grade.model_dump()
                 effect_params = EffectColorGradeParams(**params_dict)
                 color_filter_str = build_ffmpeg_color_filter(effect_params)
 
@@ -250,14 +269,138 @@ class RenderPlanner:
                 )
             audio_concat_inputs.append(f"[{a_label}]")
 
+        # 3. Apply Transitions and Segmentation
+        final_v_streams = []
+        final_a_streams = []
+        
+        transition_map = {
+            "crossfade": "fade",
+            "fade": "fade",
+            "dip_to_black": "fadeblack",
+            "slide_left": "slideleft",
+            "slide_right": "slideright",
+            "slide_up": "slideup",
+            "slide_down": "slidedown",
+            "wipe_left": "wipeleft",
+            "wipe_right": "wiperight",
+            "wipe_up": "wipeup",
+            "wipe_down": "wipedown",
+            "iris_circle": "circleopen",
+            "circleopen": "circleopen",
+            "zoom_in": "zoomin",
+            "zoom_out": "zoomout",
+            "glitch": "slidedown",
+            "pixelate": "fade",
+            "spin": "fade",
+            "ripple": "fade",
+            "blur": "fade",
+        }
+
+        # Precompute clip durations
+        clip_durations = []
+        for clip in timeline.video_clips:
+            speed_val = clip.speed if clip.speed else 1.0
+            dur = (clip.end_in_clip - clip.start_in_clip) / speed_val
+            clip_durations.append(dur)
+
+        # Generate segments and transitions in chronological order
+        for i, clip in enumerate(timeline.video_clips):
+            dur_i = clip_durations[i]
+            
+            fade_in_dur = 0.0
+            if i > 0:
+                prev_dur = clip_durations[i - 1]
+                fade_in_dur = min(clip.transition_in_duration or 0.5, prev_dur / 2, dur_i / 2)
+                
+            fade_out_dur = 0.0
+            if i < len(timeline.video_clips) - 1:
+                next_clip = timeline.video_clips[i + 1]
+                next_dur = clip_durations[i + 1]
+                fade_out_dur = min(next_clip.transition_in_duration or 0.5, dur_i / 2, next_dur / 2)
+
+            # Slice clip if transition exists on either side
+            if fade_in_dur > 0.05 or fade_out_dur > 0.05:
+                # Slice start transition
+                if fade_in_dur > 0.05:
+                    filter_complex_parts.append(
+                        f"[v_proc_{i}]trim=start=0:duration={fade_in_dur},setpts=PTS-STARTPTS[v_proc_{i}_start]"
+                    )
+                    filter_complex_parts.append(
+                        f"[a_proc_{i}]atrim=start=0:duration={fade_in_dur},asetpts=PTS-STARTPTS[a_proc_{i}_start]"
+                    )
+
+                # Slice end transition
+                if fade_out_dur > 0.05:
+                    filter_complex_parts.append(
+                        f"[v_proc_{i}]trim=start={dur_i - fade_out_dur}:duration={fade_out_dur},setpts=PTS-STARTPTS[v_proc_{i}_end]"
+                    )
+                    filter_complex_parts.append(
+                        f"[a_proc_{i}]atrim=start={dur_i - fade_out_dur}:duration={fade_out_dur},asetpts=PTS-STARTPTS[a_proc_{i}_end]"
+                    )
+
+                # Slice main body
+                main_dur = dur_i - fade_in_dur - fade_out_dur
+                if main_dur > 0.05:
+                    filter_complex_parts.append(
+                        f"[v_proc_{i}]trim=start={fade_in_dur}:duration={main_dur},setpts=PTS-STARTPTS[v_proc_{i}_main]"
+                    )
+                    filter_complex_parts.append(
+                        f"[a_proc_{i}]atrim=start={fade_in_dur}:duration={main_dur},asetpts=PTS-STARTPTS[a_proc_{i}_main]"
+                    )
+            
+            # Append to streams chronologically
+            if i > 0 and fade_in_dur > 0.05:
+                # 1. Bake and append the transition from clip i-1 to clip i
+                params = clip.transition_params or {}
+                if params.get("mask_mode") == "custom" and params.get("custom_mask_path"):
+                    mask_path = params["custom_mask_path"]
+                    norm_mask_path = os.path.abspath(mask_path).replace("\\", "/")
+                    if norm_mask_path in input_map:
+                        mask_input_idx = input_map[norm_mask_path]
+                        filter_complex_parts.append(
+                            f"[{mask_input_idx}:v]scale={target_w}:{target_h},trim=duration={fade_in_dur},setpts=PTS-STARTPTS[v_mask_{i}]"
+                        )
+                        filter_complex_parts.append(
+                            f"[v_proc_{i-1}_end][v_proc_{i}_start][v_mask_{i}]maskedmerge[v_trans_{i}]"
+                        )
+                        final_v_streams.append(f"[v_trans_{i}]")
+                    else:
+                        filter_complex_parts.append(
+                            f"[v_proc_{i-1}_end][v_proc_{i}_start]xfade=transition=fade:duration={fade_in_dur}:offset=0[v_trans_{i}]"
+                        )
+                        final_v_streams.append(f"[v_trans_{i}]")
+                else:
+                    trans_val = str(clip.transition_in.value).lower()
+                    xfade_trans = transition_map.get(trans_val, "fade")
+                    filter_complex_parts.append(
+                        f"[v_proc_{i-1}_end][v_proc_{i}_start]xfade=transition={xfade_trans}:duration={fade_in_dur}:offset=0[v_trans_{i}]"
+                    )
+                    final_v_streams.append(f"[v_trans_{i}]")
+
+                # Bake and append the audio transition (acrossfade)
+                filter_complex_parts.append(
+                    f"[a_proc_{i-1}_end][a_proc_{i}_start]acrossfade=d={fade_in_dur}[a_trans_{i}]"
+                )
+                final_a_streams.append(f"[a_trans_{i}]")
+
+            # 2. Append the main body of clip i
+            if fade_in_dur > 0.05 or fade_out_dur > 0.05:
+                main_dur = dur_i - fade_in_dur - fade_out_dur
+                if main_dur > 0.05:
+                    final_v_streams.append(f"[v_proc_{i}_main]")
+                    final_a_streams.append(f"[a_proc_{i}_main]")
+            else:
+                final_v_streams.append(f"[v_proc_{i}]")
+                final_a_streams.append(f"[a_proc_{i}]")
+
         # Video Concatenation
         filter_complex_parts.append(
-            f"{''.join(video_concat_inputs)}concat=n={len(video_concat_inputs)}:v=1:a=0[v_main_concat]"
+            f"{''.join(final_v_streams)}concat=n={len(final_v_streams)}:v=1:a=0[v_main_concat]"
         )
         
         # Audio Concatenation
         filter_complex_parts.append(
-            f"{''.join(audio_concat_inputs)}concat=n={len(audio_concat_inputs)}:v=0:a=1[a_main_concat]"
+            f"{''.join(final_a_streams)}concat=n={len(final_a_streams)}:v=0:a=1[a_main_concat]"
         )
 
         current_v = "v_main_concat"

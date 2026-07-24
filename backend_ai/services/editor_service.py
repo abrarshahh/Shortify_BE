@@ -74,8 +74,8 @@ class VideoEditor:
         editor_config = AGENTS_CONFIG.get("video_editor", {})
         self.DEFAULT_FADE_DURATION = float(editor_config.get("default_fade_duration", VIDEO_EDITOR_DEFAULT_FADE_DURATION))
         self.ORIGINAL_AUDIO_VOLUME = float(editor_config.get("original_audio_volume", 1.0))
-        self.MUSIC_VOLUME = float(editor_config.get("music_volume", 0.22))
-        self.MUSIC_DUCKED_VOLUME = float(editor_config.get("music_ducked_volume", 0.06))
+        self.MUSIC_VOLUME = float(editor_config.get("music_volume", 0.70))
+        self.MUSIC_DUCKED_VOLUME = float(editor_config.get("music_ducked_volume", 0.22))
         self.target_w = 1080
         self.target_h = 1920
 
@@ -329,7 +329,7 @@ class VideoEditor:
                             "-i", clip_path,
                             "-vf", f"fps=fps=30,vidstabtransform=input={trf_path_escaped}:smoothing=15:optzoom=1",
                             "-map", "0:v",
-                            "-map", "0:a?",
+                            "-map", "0:a:0?",
                             "-c:v", "libx264",
                             "-pix_fmt", "yuv420p",
                             "-c:a", "aac",
@@ -1139,6 +1139,36 @@ class VideoEditor:
         """
         Renders the final video from an EDL produced by CreativeDirector.
         """
+        # Resolve custom transitions and generate masks (Task 37)
+        timeline_items = edl.get("timeline", [])
+        if timeline_items:
+            from backend_ai.agents.mask_agent import MaskGeneratorAgent
+            mask_agent = MaskGeneratorAgent()
+            dimensions_map = {
+                "9:16": (1080, 1920),
+                "16:9": (1920, 1080),
+                "1:1": (1080, 1080),
+            }
+            target_w, target_h = dimensions_map.get(aspect_ratio, (1080, 1920))
+            for item in timeline_items:
+                trans = str(item.get("transition") or "none").lower()
+                params = item.get("transition_params") or {}
+                if trans != "none" and params.get("mask_mode") == "custom":
+                    mask_name = params.get("custom_mask_name", "circle")
+                    fade_dur = 0.5
+                    try:
+                        mask_path = mask_agent.generate_mask(
+                            mask_name=mask_name,
+                            duration=fade_dur,
+                            width=target_w,
+                            height=target_h,
+                            fps=30
+                        )
+                        params["custom_mask_path"] = mask_path
+                        item["transition_params"] = params
+                    except Exception as mask_err:
+                        logger.error(f"VideoEditor: Failed to generate custom transition mask: {mask_err}")
+
         # --- NEW RENDER PLANNER COMPILATION ENGINE INTEGRATION ---
         try:
             from backend_ai.schemas.edl import EDLDocument, convert_edl_to_timeline_ir
@@ -1293,6 +1323,17 @@ class VideoEditor:
                     orig_audio_vol = 0.0 if audio_ducking else ducking_params.get("original_audio_volume")
                     music_vol = self.MUSIC_VOLUME if audio_ducking else ducking_params.get("music_volume_during_segment")
 
+                    # Avoid double color grading: if a global style/LUT is active, clips should start with natural colors
+                    clip_color_grade = item.get("color_grade")
+                    if not clip_color_grade:
+                        style_lower = (edl.get("style") or "general").lower()
+                        luts_dir = os.path.abspath(os.path.join("data", "luts"))
+                        lut_exists = os.path.exists(os.path.join(luts_dir, f"{style_lower}.cube"))
+                        if not lut_exists and style_lower != "general" and style_lower != "none":
+                            lut_exists = True
+                        if not lut_exists:
+                            clip_color_grade = edl.get("global_color_grade")
+
                     processed_dur = self._process_single_clip(
                         clip_path=clip_path,
                         is_image=is_image,
@@ -1310,7 +1351,7 @@ class VideoEditor:
                         sticker_path=item.get("sticker_path"),
                         sticker_position=item.get("sticker_position", "bottom-center"),
                         effect_path=item.get("effect_path"),
-                        color_grade=item.get("color_grade") or edl.get("global_color_grade"),
+                        color_grade=clip_color_grade,
                         clip_effect=item.get("clip_effect"),
                         speed_preset=item.get("speed_preset"),
                         speed_keyframes=item.get("speed_keyframes"),

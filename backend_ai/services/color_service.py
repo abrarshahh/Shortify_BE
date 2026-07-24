@@ -138,45 +138,162 @@ class ColorGradingAgent:
         self._generate_default_luts()
 
     def _generate_default_luts(self):
-        cinematic_path = os.path.join(self.luts_dir, "cinematic.cube")
-        if not os.path.exists(cinematic_path):
-            logger.info("Generating default cinematic LUT file...")
-            content = (
-                "TITLE \"Cinematic Teal Orange\"\n"
-                "LUT_3D_SIZE 2\n"
-                "DOMAIN_MIN 0.0 0.0 0.0\n"
-                "DOMAIN_MAX 1.0 1.0 1.0\n"
-                "0.0 0.05 0.08\n"
-                "0.95 0.1 0.05\n"
-                "0.05 0.9 0.2\n"
-                "0.98 0.9 0.2\n"
-                "0.05 0.1 0.9\n"
-                "0.9 0.15 0.85\n"
-                "0.0 0.85 0.9\n"
-                "0.98 0.96 0.90\n"
-            )
-            with open(cinematic_path, "w") as f:
-                f.write(content)
+        # We define a helper to generate a LUT file of size 17 if it doesn't exist
+        # Or if it exists but is of size 2 (outdated) or lacks the loop fix, we overwrite it.
+        def should_regenerate(path):
+            if not os.path.exists(path):
+                return True
+            try:
+                with open(path, "r") as f:
+                    content = f.read(500)
+                    if "LUT_3D_SIZE 2" in content or "# Corrected Loop Order" not in content:
+                        return True
+            except Exception:
+                pass
+            return False
 
+        size = 17
+        
+        # 1. Cinematic
+        cinematic_path = os.path.join(self.luts_dir, "cinematic.cube")
+        if should_regenerate(cinematic_path):
+            logger.info("Generating high-quality Cinematic Teal-Orange LUT...")
+            lines = [
+                '# Corrected Loop Order',
+                'TITLE "Cinematic Teal Orange"',
+                f'LUT_3D_SIZE {size}',
+                'DOMAIN_MIN 0.0 0.0 0.0',
+                'DOMAIN_MAX 1.0 1.0 1.0'
+            ]
+            def s_curve(x):
+                return 3 * (x**2) - 2 * (x**3)
+            for b_idx in range(size):
+                b = b_idx / (size - 1)
+                for g_idx in range(size):
+                    g = g_idx / (size - 1)
+                    for r_idx in range(size):
+                        r = r_idx / (size - 1)
+                        r_c, g_c, b_c = s_curve(r), s_curve(g), s_curve(b)
+                        luma = 0.299 * r_c + 0.587 * g_c + 0.114 * b_c
+                        if luma > 0.5:
+                            w = (luma - 0.5) * 2.0
+                            ro = r_c + 0.08 * w
+                            go = g_c + 0.03 * w
+                            bo = b_c - 0.05 * w
+                        else:
+                            w = (0.5 - luma) * 2.0
+                            ro = r_c - 0.05 * w
+                            go = g_c + 0.01 * w
+                            bo = b_c + 0.06 * w
+                        ro = max(0.0, min(1.0, ro))
+                        go = max(0.0, min(1.0, go))
+                        bo = max(0.0, min(1.0, bo))
+                        lines.append(f"{ro:.6f} {go:.6f} {bo:.6f}")
+            with open(cinematic_path, "w") as f:
+                f.write("\n".join(lines) + "\n")
+
+        # 2. Vintage
         vintage_path = os.path.join(self.luts_dir, "vintage.cube")
-        if not os.path.exists(vintage_path):
-            logger.info("Generating default vintage LUT file...")
-            content = (
-                "TITLE \"Vintage Faded Warm\"\n"
-                "LUT_3D_SIZE 2\n"
-                "DOMAIN_MIN 0.0 0.0 0.0\n"
-                "DOMAIN_MAX 1.0 1.0 1.0\n"
-                "0.08 0.08 0.08\n"
-                "0.85 0.15 0.15\n"
-                "0.15 0.8 0.2\n"
-                "0.9 0.85 0.3\n"
-                "0.15 0.2 0.8\n"
-                "0.8 0.2 0.75\n"
-                "0.15 0.75 0.8\n"
-                "0.92 0.9 0.85\n"
-            )
+        if should_regenerate(vintage_path):
+            logger.info("Generating high-quality Vintage Retro Warm LUT...")
+            lines = [
+                '# Corrected Loop Order',
+                'TITLE "Vintage Faded Warm"',
+                f'LUT_3D_SIZE {size}',
+                'DOMAIN_MIN 0.0 0.0 0.0',
+                'DOMAIN_MAX 1.0 1.0 1.0'
+            ]
+            for b_idx in range(size):
+                b = b_idx / (size - 1)
+                for g_idx in range(size):
+                    g = g_idx / (size - 1)
+                    for r_idx in range(size):
+                        r = r_idx / (size - 1)
+                        # Lift blacks, compress whites
+                        ro = 0.07 + 0.88 * r
+                        go = 0.07 + 0.88 * g
+                        bo = 0.07 + 0.88 * b
+                        luma = 0.299 * ro + 0.587 * go + 0.114 * bo
+                        # Desaturate slightly
+                        ro = ro * 0.75 + luma * 0.25
+                        go = go * 0.75 + luma * 0.25
+                        bo = bo * 0.75 + luma * 0.25
+                        # Warm toning push
+                        ro += 0.04
+                        go += 0.01
+                        bo -= 0.02
+                        ro = max(0.0, min(1.0, ro))
+                        go = max(0.0, min(1.0, go))
+                        bo = max(0.0, min(1.0, bo))
+                        lines.append(f"{ro:.6f} {go:.6f} {bo:.6f}")
             with open(vintage_path, "w") as f:
-                f.write(content)
+                f.write("\n".join(lines) + "\n")
+
+        # 3. Monochrome
+        monochrome_path = os.path.join(self.luts_dir, "monochrome.cube")
+        if should_regenerate(monochrome_path):
+            logger.info("Generating high-quality Monochrome Noir LUT...")
+            lines = [
+                '# Corrected Loop Order',
+                'TITLE "Monochrome Noir"',
+                f'LUT_3D_SIZE {size}',
+                'DOMAIN_MIN 0.0 0.0 0.0',
+                'DOMAIN_MAX 1.0 1.0 1.0'
+            ]
+            for b_idx in range(size):
+                b = b_idx / (size - 1)
+                for g_idx in range(size):
+                    g = g_idx / (size - 1)
+                    for r_idx in range(size):
+                        r = r_idx / (size - 1)
+                        luma = 0.299 * r + 0.587 * g + 0.114 * b
+                        val = 3 * (luma**2) - 2 * (luma**3)
+                        ro = val
+                        go = val
+                        bo = val * 1.02
+                        ro = max(0.0, min(1.0, ro))
+                        go = max(0.0, min(1.0, go))
+                        bo = max(0.0, min(1.0, bo))
+                        lines.append(f"{ro:.6f} {go:.6f} {bo:.6f}")
+            with open(monochrome_path, "w") as f:
+                f.write("\n".join(lines) + "\n")
+
+        # 4. Nordic
+        nordic_path = os.path.join(self.luts_dir, "nordic.cube")
+        if should_regenerate(nordic_path):
+            logger.info("Generating high-quality Nordic Cool LUT...")
+            lines = [
+                '# Corrected Loop Order',
+                'TITLE "Nordic Cool"',
+                f'LUT_3D_SIZE {size}',
+                'DOMAIN_MIN 0.0 0.0 0.0',
+                'DOMAIN_MAX 1.0 1.0 1.0'
+            ]
+            for b_idx in range(size):
+                b = b_idx / (size - 1)
+                for g_idx in range(size):
+                    g = g_idx / (size - 1)
+                    for r_idx in range(size):
+                        r = r_idx / (size - 1)
+                        luma = 0.299 * r + 0.587 * g + 0.114 * b
+                        ro = r * 0.6 + luma * 0.4
+                        go = g * 0.6 + luma * 0.4
+                        bo = b * 0.6 + luma * 0.4
+                        if luma < 0.5:
+                            w = (0.5 - luma) * 2.0
+                            ro -= 0.03 * w
+                            go -= 0.01 * w
+                            bo += 0.05 * w
+                        else:
+                            w = (luma - 0.5) * 2.0
+                            ro -= 0.01 * w
+                            bo += 0.02 * w
+                        ro = max(0.0, min(1.0, ro))
+                        go = max(0.0, min(1.0, go))
+                        bo = max(0.0, min(1.0, bo))
+                        lines.append(f"{ro:.6f} {go:.6f} {bo:.6f}")
+            with open(nordic_path, "w") as f:
+                f.write("\n".join(lines) + "\n")
 
     def _get_preset(self, style: str) -> Dict[str, float]:
         """

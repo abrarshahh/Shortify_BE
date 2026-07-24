@@ -451,6 +451,14 @@ def create_spatial_transition(
     
     name = transition_name.lower()
     
+    # Check for custom mask transition (Task 37)
+    custom_mask_cap = None
+    if transition_params and transition_params.get("mask_mode") == "custom" and transition_params.get("custom_mask_path"):
+        mask_path = transition_params["custom_mask_path"]
+        if os.path.exists(mask_path):
+            custom_mask_cap = cv2.VideoCapture(mask_path)
+            logger.info(f"create_spatial_transition: Using custom transition mask: {mask_path}")
+
     try:
         is_mask = name in (
             "split_horizontal", "split_reveal_horizontal", "split_vertical", "split_reveal_vertical",
@@ -461,7 +469,7 @@ def create_spatial_transition(
         )
         is_slide = name in ("slide_left", "slide_right", "slide_up", "slide_down", "slide_push")
         
-        if is_mask:
+        if is_mask and not custom_mask_cap:
             mask_func = make_mask(transition_name, duration, frame_size, transition_params)
             
         for f_idx in range(num_frames):
@@ -483,7 +491,21 @@ def create_spatial_transition(
             t = f_idx / fps
             progress = f_idx / (num_frames - 1) if num_frames > 1 else 1.0
             
-            if is_slide:
+            if custom_mask_cap and custom_mask_cap.isOpened():
+                ret_m, frame_m = custom_mask_cap.read()
+                if ret_m:
+                    if len(frame_m.shape) == 3:
+                        mask_gray = cv2.cvtColor(frame_m, cv2.COLOR_BGR2GRAY)
+                    else:
+                        mask_gray = frame_m
+                    if mask_gray.shape != (h, w):
+                        mask_gray = cv2.resize(mask_gray, (w, h))
+                    mask_norm = mask_gray.astype(np.float32) / 255.0
+                    mask_3d = np.expand_dims(mask_norm, axis=2)
+                    blended = (frame_b.astype(np.float32) * mask_3d + frame_a.astype(np.float32) * (1.0 - mask_3d)).astype(np.uint8)
+                else:
+                    blended = (frame_b.astype(np.float32) * progress + frame_a.astype(np.float32) * (1.0 - progress)).astype(np.uint8)
+            elif is_slide:
                 blended = slide_frames(frame_a, frame_b, transition_name, progress, transition_params)
             elif is_mask:
                 mask = mask_func(t)
@@ -509,6 +531,8 @@ def create_spatial_transition(
     finally:
         cap_a.release()
         cap_b.release()
+        if custom_mask_cap:
+            custom_mask_cap.release()
         out.release()
         
     has_audio_a = check_has_audio_stream(clip_a_path)
